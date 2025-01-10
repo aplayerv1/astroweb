@@ -1,6 +1,6 @@
 *.pyc
-output/
-venv/
+output/*
+venv/*
 .env
 *.log
-models/
+models/*
