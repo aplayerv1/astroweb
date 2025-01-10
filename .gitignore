@@ -1,6 +1,0 @@
-*.pyc
-output/
-venv/
-.env
-*.log
-models/
