@@ -7,6 +7,9 @@
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/moment.js/2.29.1/moment.min.js"></script>
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script src="https://aladin.u-strasbg.fr/AladinLite/api/v2/latest/aladin.min.js"></script>
     <style>
         body {
             background-color: #1a1a1a;
@@ -32,6 +35,14 @@
             height: 300px;
             overflow-y: auto;
         }
+        .sky-map-container {
+            width: 100%;
+            height: 300px;
+            border-radius: 5px;
+            overflow: hidden;
+            margin: 10px 0;
+        }
+
     </style>
 </head>
 <body>
@@ -49,8 +60,13 @@
             
             <div class="col-md-4">
                 <div class="dashboard-card">
-                    <h3>Tuned Frequency</h3>
+                    <h3>Sky Position</h3>
                     <div class="value-display" id="frequency">--</div>
+                    <div class="sky-map-container">
+                        <div id="aladin-lite-div" style="width: 100%; height: 100%;"></div>
+                    </div>
+                    <div class="mt-2">                        
+                    </div>
                 </div>
             </div>
             
@@ -85,8 +101,58 @@
                 </div>
             </div>
         </div>
+
     <script>
-        // Initialize all charts
+        // Sky position calculations
+        function calculatePointingCoordinates(lat, lon, azimuth) {
+            const LST = moment().utc().hours() + lon/15;
+            const lat_rad = lat * Math.PI/180;
+            const az_rad = azimuth * Math.PI/180;
+            
+            const alt = 90 - lat_rad;
+            const ra = LST + Math.atan2(Math.sin(az_rad), 
+                                    Math.cos(az_rad)*Math.sin(lat_rad) - 
+                                    Math.tan(alt)*Math.cos(lat_rad)) * 12/Math.PI;
+            const dec = Math.asin(Math.sin(lat_rad)*Math.sin(alt) + 
+                                Math.cos(lat_rad)*Math.cos(alt)*Math.cos(az_rad)) * 180/Math.PI;
+            
+            return {ra: ra, dec: dec};
+        }
+
+        // Initialize Aladin with enhanced overlays
+        let aladin = A.aladin('#aladin-lite-div', {
+            survey: "P/DSS2/color",
+            fov: 5,
+            cooFrame: 'equatorial',
+            showReticle: false,
+            showZoomControl: false,
+            showFullscreenControl: false,
+            showLayersControl: false,
+            showGotoControl: false
+        });
+
+        // Add Simbad catalog for named objects
+        aladin.addCatalog(A.catalogFromSimbad('', {onClick: 'showPopup'}));
+        
+        // Add catalog overlay
+        let hipscat = A.catalogHiPS('https://axel.u-strasbg.fr/HiPSCatService/I/345/gaia2');
+        aladin.addCatalog(hipscat);
+
+        // Update pointing
+        function updateSkyPosition() {
+            const coords = calculatePointingCoordinates(41.604730, -8.464160, 30);
+            aladin.gotoRaDec(coords.ra, coords.dec);
+            
+            aladin.removeLayers();
+            aladin.addMarker(coords.ra, coords.dec, {
+                color: '#00ff00',
+                label: 'Telescope FOV',
+                popupTitle: 'Current Pointing',
+                popupDesc: `RA: ${coords.ra.toFixed(2)}h, Dec: ${coords.dec.toFixed(2)}°`
+            });
+        }
+
+        // Initialize charts
         const signalCtx = document.getElementById('signalChart').getContext('2d');
         const fftCtx = document.getElementById('fftChart').getContext('2d');
         const powerCtx = document.getElementById('powerChart').getContext('2d');
@@ -152,6 +218,7 @@
         const renderer = new THREE.WebGLRenderer({ canvas: spectrogramCanvas });
         const scene = new THREE.Scene();
         const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 10);
+        
         const spectrogramWidth = 1024;
         const spectrogramHeight = 512;
         const spectrogramData = new Uint8Array(spectrogramWidth * spectrogramHeight * 3);
@@ -217,7 +284,6 @@
             }
         }
 
-        // Handle window resize
         function resizeRenderer() {
             const canvas = renderer.domElement;
             const width = canvas.clientWidth;
@@ -247,7 +313,20 @@
         }
 
         setInterval(fetchData, 1000);
+        setInterval(updateSkyPosition, 60000);
+        updateSkyPosition();
 
+        // Live logs
+        const eventSource = new EventSource('/logs');
+        eventSource.onmessage = function(event) {
+            if (event.data.trim()) {
+                const logContainer = document.getElementById('log-container');
+                const logEntry = document.createElement('div');
+                logEntry.textContent = event.data;
+                logContainer.appendChild(logEntry);
+                logContainer.scrollTop = logContainer.scrollHeight;
+            }
+        };
     </script>
 </body>
 </html>
