@@ -119,7 +119,7 @@ def train_model(model):
     history = model.fit(
         data_generator(chunk_size),
         steps_per_epoch=steps_per_epoch,
-        epochs=100,
+        epochs=10,
         batch_size=8
     )
     weights_path = os.path.join('models', 'signal_classifier.weights.h5')
@@ -142,9 +142,10 @@ def load_model_weights(model, weights_file):
 def predict_signal(model, samples):
     logger.debug("Predicting signal")
     reshaped_samples = np.reshape(samples, (1, 8192, 1))
-    confidence = model.predict(reshaped_samples, verbose=1)
-    logger.debug(f"Detection confidence: {confidence[0][0]}")
-    return confidence[0][0] >= 0.85  # Lower threshold for better detection
+    confidence = model.predict(reshaped_samples, verbose=0)
+    confidence_value = float(confidence[0][0])
+    logger.debug(f"Detection confidence: {confidence_value}")
+    return (confidence_value >= 0.75, confidence_value)
 
 def plot_signal_strength(signal_strength, output_dir, timestamp):
     logger.debug("Plotting signal strength")
@@ -275,27 +276,33 @@ def process_continuous_stream(client_socket, model, output_dir, lnb_band=LNB_HIG
                 signal_strength = np.mean(np.abs(processed_samples))
                 signal_no_dc = processed_samples - np.mean(processed_samples)
                 fft_magnitude = np.abs(np.fft.fft(signal_no_dc))
+                fft_freq = np.fft.fftshift(np.fft.fftfreq(chunk_size, 1/fs))
+                fft_data = np.fft.fftshift(np.abs(np.fft.fft(processed_samples)))
+                fft_phase = np.fft.fftshift(np.angle(np.fft.fft(processed_samples)))
+                fft_power = np.fft.fftshift(np.abs(np.fft.fft(processed_samples))**2)
+              
+              
+                detection, confidence_value = predict_signal(model, prediction_samples)
                 
                 web_data = {
                     'timestamp': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     'frequency': f"{freq_start/1e6:.2f} MHz",
                     'signal_strength': f"{signal_strength:.2f} dB",
-                    'status': 'Active',
+                    'status': f"Active - Detection Confidence: {confidence_value*100:.2f}%",
                     'processed_samples': processed_samples.tolist(),
-                    'fft_data': np.abs(np.fft.fft(processed_samples)).tolist(),
-                    'fft_freq': np.fft.fftfreq(chunk_size, 1/fs).tolist(),
+                    'fft_data': fft_data.tolist(),
+                    'fft_freq': (fft_freq + freq_start/1e6).tolist(),
                     'fft_magnitude': fft_magnitude.tolist(),
-                    'fft_phase': np.angle(np.fft.fft(processed_samples)).tolist(),
-                    'fft_power': (np.abs(np.fft.fft(processed_samples))**2).tolist(),
-                    'fft_power_db': (10 * np.log10(np.abs(np.fft.fft(processed_samples))**2)).tolist(),
-                    'fft_power_db_normalized': (10 * np.log10(np.abs(np.fft.fft(processed_samples))**2 / np.max(np.abs(np.fft.fft(processed_samples))**2))).tolist()
+                    'fft_phase': fft_phase.tolist(),
+                    'fft_power': fft_power.tolist(),
+                    'fft_power_db': (10 * np.log10(fft_power)).tolist(),
+                    'fft_power_db_normalized': (10 * np.log10(fft_power / np.max(fft_power))).tolist()
                 }
 
                 
                 app.config['LATEST_DATA'] = web_data
                 
-                
-                if predict_signal(model, prediction_samples):
+                if detection:
                     logger.info("WOW Signal detected!")
                     timestamp = datetime.datetime.now()
                     save_detected_signal(processed_samples, timestamp, output_dir)
