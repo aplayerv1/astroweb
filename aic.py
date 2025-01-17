@@ -296,9 +296,9 @@ def retry_connection(func):
         raise ConnectionError("Maximum retry attempts reached")    
     return wrapper
 
-# Example usage - apply the decorator to functions that need retry logic
 @retry_connection
-def connect_to_server(host='localhost', port=8888):
+def connect_to_server(host, port):
+    """Connect to server while maintaining CLI argument values"""
     logger.debug(f"Connecting to server at {host}:{port}")
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     client_socket.settimeout(30)
@@ -313,16 +313,17 @@ def connect_to_server(host='localhost', port=8888):
     }
     
     client_socket.sendall(json.dumps(tuning_parameters).encode())
-    logger.info("Successfully connected to server")
+    logger.info(f"Successfully connected to server at {host}:{port}")
     return client_socket
 
-def process_continuous_stream(client_socket, model, output_dir, lnb_band=LNB_HIGH):
+def process_continuous_stream(client_socket, model, output_dir, lnb_band=LNB_HIGH,host=None,port=None):
     import sys
     import select
     import termios
     import tty
     from scipy import signal
-    
+    connection_host = host or client_socket.getpeername()[0]
+    connection_port = port or client_socket.getpeername()[1]
     def is_key_pressed():
         if select.select([sys.stdin], [], [], 0)[0]:
             key = sys.stdin.read(1)
@@ -352,11 +353,11 @@ def process_continuous_stream(client_socket, model, output_dir, lnb_band=LNB_HIG
                     consecutive_empty_reads += 1
                     logger.warning(f"No samples received. Empty read count: {consecutive_empty_reads}")
                     
-                    if consecutive_empty_reads >= max_empty_reads:
-                        logger.info("Connection appears dead, initiating reconnection...")
-                        client_socket.close()
-                        client_socket = connect_to_server()
-                        consecutive_empty_reads = 0
+                if consecutive_empty_reads >= max_empty_reads:
+                    logger.info("Connection appears dead, initiating reconnection...")
+                    client_socket.close()
+                    client_socket = connect_to_server(connection_host, connection_port)
+                    consecutive_empty_reads = 0
                     continue
 
                 consecutive_empty_reads = 0
@@ -410,7 +411,7 @@ def process_continuous_stream(client_socket, model, output_dir, lnb_band=LNB_HIG
             except (ConnectionError, socket.error) as e:
                 logger.error(f"Stream error: {e}")
                 client_socket.close()
-                client_socket = connect_to_server()
+                client_socket = connect_to_server(connection_host, connection_port)
                 continue
             except KeyboardInterrupt:
                 logger.info("Stream processing interrupted by user")
@@ -418,7 +419,7 @@ def process_continuous_stream(client_socket, model, output_dir, lnb_band=LNB_HIG
             except Exception as e:
                 logger.error(f"Stream processing error: {e}")
                 client_socket.close()
-                client_socket = connect_to_server()
+                client_socket = connect_to_server(connection_host, connection_port)
                 continue
     
     finally:
@@ -506,7 +507,9 @@ def main():
     parser.add_argument('--band', choices=['low', 'high'], default='low', help='LNB band selection')
     parser.add_argument('--path', type=str, default='data', help='Path to csv file')
     args = parser.parse_args()
-
+    HOST_H = args.host
+    PORT_P = args.port
+    
     os.makedirs(args.output_dir, exist_ok=True)
     
     lnb_band = LNB_LOW if args.band == 'low' else LNB_HIGH
@@ -525,8 +528,8 @@ def main():
         model = create_model()
         train_model(model, args.path)
     
-    client_socket = connect_to_server(args.host, args.port)
-    process_continuous_stream(client_socket, model, args.output_dir, lnb_band)
+    client_socket = connect_to_server(HOST_H, PORT_P)
+    process_continuous_stream(client_socket, model, args.output_dir, lnb_band,HOST_H,PORT_P)
 
 
 if __name__ == "__main__":
