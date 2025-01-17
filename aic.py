@@ -14,6 +14,9 @@ import datetime
 import socket
 import json
 from astropy.io import fits
+from advance_signal_processing import denoise_signal, remove_dc_offset, remove_lnb_effect, process_fft
+from training import generate_wow_signals, generate_pulsar_signals, generate_frb_signals, generate_hydrogen_line, load_training_data_from_folder
+import cupy as cp
 # Configure logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger()
@@ -24,24 +27,6 @@ notch_width = 50e3 # Notch width in Hz
 LNB_LOW = 9.75e9   # Low band LNB frequency (9.75 GHz)
 LNB_HIGH = 10.6e9  # High band LNB frequency (10.6 GHz)
 freq_start = 1420e6
-
-def remove_lnb_effect(samples, fs, notch_freq, notch_width, lnb_band=LNB_LOW):
-    """Remove LNB effects and interference from samples"""
-    logger.debug(f"Removing LNB effect using band {lnb_band}")
-    nyquist = 0.5 * fs
-    lowcut = (notch_freq - notch_width / 2) / nyquist
-    highcut = (notch_freq + notch_width / 2) / nyquist
-
-    # Apply bandstop filter to remove interference
-    b, a = butter(4, [lowcut, highcut], btype='bandstop')
-    filtered_samples = lfilter(b, a, samples)
-
-    # Apply frequency translation based on LNB band
-    t = np.arange(len(filtered_samples)) / fs
-    freq_offset = lnb_band - 1420e6
-    translated_samples = filtered_samples * np.exp(2j * np.pi * freq_offset * t)
-
-    return translated_samples
 
 
 def apply_bandpass_filter(samples, fs, low_cutoff, high_cutoff):
@@ -55,89 +40,146 @@ def apply_bandpass_filter(samples, fs, low_cutoff, high_cutoff):
     return filtered_samples
 
 def create_model():
-    logger.debug("Creating model")
     model = tf.keras.Sequential([
-        tf.keras.layers.Conv1D(32, kernel_size=3, activation='relu', input_shape=(8192, 1)),
+        # Input processing block
+        tf.keras.layers.Conv1D(256, kernel_size=9, activation='relu', input_shape=(8192, 1)),
+        tf.keras.layers.BatchNormalization(),
+        tf.keras.layers.MaxPooling1D(pool_size=4),
+        tf.keras.layers.Dropout(0.2),
+        
+        # Feature extraction block
+        tf.keras.layers.Conv1D(128, kernel_size=7, activation='relu'),
+        tf.keras.layers.BatchNormalization(),
+        tf.keras.layers.MaxPooling1D(pool_size=4),
+        tf.keras.layers.Dropout(0.2),
+        
+        # Pattern recognition block
+        tf.keras.layers.Conv1D(64, kernel_size=5, activation='relu'),
+        tf.keras.layers.BatchNormalization(),
         tf.keras.layers.MaxPooling1D(pool_size=2),
-        tf.keras.layers.Flatten(),
-        tf.keras.layers.Dense(64, activation='relu'),
-        tf.keras.layers.Dense(1, activation='sigmoid')
+        tf.keras.layers.Dropout(0.2),
+        
+        # Final feature processing
+        tf.keras.layers.GlobalAveragePooling1D(),
+        
+        # Classification layers
+        tf.keras.layers.Dense(256, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.01)),
+        tf.keras.layers.Dense(128, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.01)),
+        tf.keras.layers.Dense(1, activation='sigmoid', bias_initializer=tf.keras.initializers.Constant(-1.0))
+
+
     ])
-    model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
+    
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(learning_rate=0.0001),
+        loss='binary_crossentropy',
+        metrics=['accuracy', tf.keras.metrics.AUC()]
+    )
+    
     return model
 
-def data_generator(chunk_size=8192):
+
+
+def data_generator(chunk_size=8192, csv_data=None):
+    if isinstance(csv_data, str):
+        csv_data = load_training_data_from_folder(csv_data, chunk_size)
+        
     while True:
-        # Base phenomena patterns
-        wow_signal = np.sin(np.linspace(0, 2*np.pi, chunk_size))
-        pulsar = np.zeros(chunk_size)
-        frb = np.zeros(chunk_size)
+        t = cp.arange(chunk_size, dtype=cp.float32)
         
-        # Create pulsar signal with varying periods
-        pulse_periods = [chunk_size//8, chunk_size//4, chunk_size//6]
-        for period in pulse_periods:
-            pulse_locations = np.arange(0, chunk_size-50, period)
-            for loc in pulse_locations:
-                pulsar[loc:loc+50] = np.exp(-np.linspace(0, 3, 50))
+        # Mix WOW signals with interference
+        wow_signals = cp.array(generate_wow_signals(chunk_size))
+        wow_signals = wow_signals.reshape(-1, chunk_size) * cp.random.uniform(0.1, 1.0, size=(wow_signals.shape[0], 1))
+        wow_signals += cp.random.normal(0, 0.3, size=wow_signals.shape)
         
-        # Create Fast Radio Burst with random location
-        burst_loc = np.random.randint(0, chunk_size-100)
-        frb[burst_loc:burst_loc+100] = 2.0 * np.exp(-np.linspace(0, 5, 100))
+        # Create complex interference patterns
+        interference = cp.stack([
+            cp.random.normal(size=chunk_size) * (1 + 0.5 * cp.sin(2 * cp.pi * 0.03 * t)),
+            cp.random.rayleigh(size=chunk_size) * cp.random.uniform(0.2, 1.8),
+            cp.cumsum(cp.random.normal(size=chunk_size)) * cp.exp(-t/chunk_size) * cp.random.uniform(0.3, 1.7),
+            cp.random.normal(0, cp.exp(-t/chunk_size)) * cp.random.uniform(0.4, 1.6)
+        ])
         
-        # Create frequency-shifting signal
-        t = np.arange(chunk_size)
-        freq_shift = np.sin(2*np.pi*0.001*t) * np.sin(2*np.pi*0.01*t)
+        # Complex natural signals with mixed interference
+        natural_signals = cp.stack([
+            cp.random.normal(size=chunk_size) * (1 + 0.3 * cp.sin(2 * cp.pi * 0.01 * t)),
+            cp.random.rayleigh(size=chunk_size) + cp.random.normal(size=chunk_size) * 0.2,
+            cp.cumsum(cp.random.normal(size=chunk_size)) * cp.exp(-t/chunk_size),
+            cp.random.normal(0, cp.exp(-t/chunk_size)) + cp.random.poisson(1.0, size=chunk_size),
+            cp.random.chisquare(df=2, size=chunk_size) * cp.random.uniform(0.5, 1.5),
+            cp.sin(2 * cp.pi * 0.1 * t) * cp.random.normal(size=chunk_size),
+            cp.random.exponential(scale=1.0, size=chunk_size),
+            cp.random.gamma(2.0, 2.0, size=chunk_size),
+            cp.random.normal(0, 1 + 0.5 * cp.sin(2 * cp.pi * 0.01 * t)),
+            cp.ones(chunk_size) * cp.random.normal(),
+            cp.linspace(-1, 1, chunk_size) * cp.random.normal(),
+            cp.sin(2 * cp.pi * 0.001 * t) * cp.random.normal(),
+            cp.random.normal() + cp.random.normal(size=chunk_size) * 0.1
+        ])
         
-        # Generate noise with different characteristics
-        gaussian_noise = np.random.normal(size=(8, chunk_size))
-        colored_noise = np.cumsum(np.random.normal(size=(8, chunk_size)), axis=1)
+        # Mix interference into natural signals
+        natural_signals = cp.stack([
+            signal + interference[i % len(interference)] * cp.random.uniform(0.1, 0.4) 
+            for i, signal in enumerate(natural_signals)
+        ])
         
-        # Combine signals with variations
-        signals = [
-            wow_signal,
-            pulsar,
-            frb,
-            freq_shift,
-            wow_signal * (1 + 0.3*np.sin(2*np.pi*0.005*t)),
-            pulsar + 0.5*freq_shift,
-            frb * (1 + 0.2*np.sin(2*np.pi*0.002*t))
-        ]
+        signals = [wow_signals]
+        if csv_data is not None:
+            csv_data = cp.array(csv_data).reshape(-1, chunk_size)
+            signals.append(csv_data)
+        signals.append(natural_signals)
         
-        X = np.vstack([signals, gaussian_noise, colored_noise])
-        y = np.hstack([np.ones(len(signals)), np.zeros(16)])
-        X = np.reshape(X, (-1, chunk_size, 1))
+        X = cp.vstack(signals).astype(cp.complex64).real.astype(cp.float32)
+        y = cp.hstack([
+            cp.ones(wow_signals.shape[0] + (csv_data.shape[0] if csv_data is not None else 0)),  # WOW signals + CSV data are 1
+            cp.zeros(natural_signals.shape[0])  # Natural signals/noise are 0
+        ])
         
-        yield X, y
+        X = cp.reshape(X, (-1, chunk_size, 1))
+        y = cp.reshape(y, (-1,))
+        
+        yield cp.asnumpy(X), cp.asnumpy(y)
 
 
-
-def train_model(model):
-    logger.debug("Training model with generator")
-    chunk_size = 8192  # 8K samples per chunk
-    steps_per_epoch = 72  # To represent 72 seconds worth of data
-    
+def train_model(model, csv_data):
     history = model.fit(
-        data_generator(chunk_size),
-        steps_per_epoch=steps_per_epoch,
-        epochs=10,
-        batch_size=8
+        data_generator(chunk_size=8192, csv_data=csv_data),
+        steps_per_epoch=72,
+        epochs=1000,
+        batch_size=4  # Increased from 4
     )
-    weights_path = os.path.join('models', 'signal_classifier.weights.h5')
-    os.makedirs('models', exist_ok=True)
-    model.save_weights(weights_path)
-    logger.info(f"Model weights saved to {weights_path}")
+    state_dir = os.path.join('models', 'full_state')
+    os.makedirs(state_dir, exist_ok=True)
+    model.save(os.path.join(state_dir, 'full_model.keras'))
+    
+    web_data = {
+        'timestamp': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        'status': 'Training in progress...',
+    }
+    app.config['LATEST_DATA'] = web_data
+    
+    bn_states = {}
+    for layer in model.layers:
+        if isinstance(layer, tf.keras.layers.BatchNormalization):
+            bn_states[layer.name] = {
+                'mean': layer.moving_mean.numpy().tolist(),
+                'variance': layer.moving_variance.numpy().tolist()
+            }
+    
+    with open(os.path.join(state_dir, 'bn_states.json'), 'w') as f:
+        json.dump(bn_states, f)
+    
     return history
 
 
 def load_model_weights(model, weights_file):
     weights_path = os.path.join('models', weights_file)
-    logger.debug(f"Loading model weights from {weights_path}")
-    
     if os.path.exists(weights_path):
         model.load_weights(weights_path)
         logger.info(f"Successfully loaded weights from {weights_path}")
     else:
         logger.error(f"Model weights file {weights_path} does not exist")
+
 
 def predict_signal(model, samples):
     logger.debug("Predicting signal")
@@ -219,108 +261,171 @@ def set_cpu_affinity(cores):
     p = psutil.Process(os.getpid())
     p.cpu_affinity(cores)
 
-def connect_to_server(host='localhost', port=8888, max_retries=None):
-    """Connect to SDR server with constant retry"""
-    import time
-    retry_count = 0
-    while max_retries is None or retry_count < max_retries:
-        try:
-            logger.debug(f"Attempting connection to server at {host}:{port}")
-            client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            client_socket.connect((host, port))
+def retry_connection(func):
+    """Decorator for retrying connections with exponential backoff"""
+    def wrapper(*args, **kwargs):
+        import time
+        max_attempts = 10
+        base_delay = 1
+        
+        for attempt in range(max_attempts):
+            try:
+                return func(*args, **kwargs)
+            except socket.timeout:
+                logger.error(f"Connection timed out (Attempt {attempt + 1}/{max_attempts})")
+            except socket.gaierror:
+                logger.error(f"DNS lookup failed (Attempt {attempt + 1}/{max_attempts})")
+            except ConnectionRefusedError:
+                logger.error(f"Connection refused (Attempt {attempt + 1}/{max_attempts})")
+            except ConnectionResetError:
+                logger.error(f"Connection reset by peer (Attempt {attempt + 1}/{max_attempts})")
+            except ConnectionAbortedError:
+                logger.error(f"Connection aborted (Attempt {attempt + 1}/{max_attempts})")
+            except OSError as e:
+                logger.error(f"OS error: {e} (Attempt {attempt + 1}/{max_attempts})")
+            except socket.error as e:
+                logger.error(f"Socket error: {e} (Attempt {attempt + 1}/{max_attempts})")
+            except Exception as e:
+                logger.error(f"Unexpected error: {e} (Attempt {attempt + 1}/{max_attempts})")
             
-            # Configure continuous streaming
-            tuning_parameters = {
-                'start_freq': 1420e6,
-                'end_freq': 1420.4e6,
-                'sample_rate': fs,
-                'gain': 20,
-                'duration_seconds': 0
-            }
-            
-            client_socket.sendall(json.dumps(tuning_parameters).encode())
-            logger.info("Successfully connected to server")
-            return client_socket
-            
-        except (ConnectionRefusedError, socket.error) as e:
-            retry_count += 1
-            logger.warning(f"Connection attempt {retry_count} failed: {e}")
-            time.sleep(5)  # Wait 5 seconds between retries
-            
-    logger.error("Max retries reached, could not connect to server")
-    raise ConnectionError("Failed to establish connection after maximum retries")
+            if attempt < max_attempts - 1:
+                delay = min(300, base_delay * (2 ** attempt))
+                logger.info(f"Retrying in {delay} seconds...")
+                time.sleep(delay)
+        
+        raise ConnectionError("Maximum retry attempts reached")    
+    return wrapper
 
+# Example usage - apply the decorator to functions that need retry logic
+@retry_connection
+def connect_to_server(host='localhost', port=8888):
+    logger.debug(f"Connecting to server at {host}:{port}")
+    client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    client_socket.settimeout(30)
+    client_socket.connect((host, port))
+    
+    tuning_parameters = {
+        'start_freq': 1420e6,
+        'end_freq': 1420.4e6,
+        'sample_rate': fs,
+        'gain': 20,
+        'duration_seconds': 0
+    }
+    
+    client_socket.sendall(json.dumps(tuning_parameters).encode())
+    logger.info("Successfully connected to server")
+    return client_socket
 
 def process_continuous_stream(client_socket, model, output_dir, lnb_band=LNB_HIGH):
-    logger.debug(f"Starting continuous stream processing using LNB band: {lnb_band}")
-    data_buffer = np.array([], dtype=np.complex64)
-    chunk_size = 8192
+    import sys
+    import select
+    import termios
+    import tty
+    from scipy import signal
     
-    while True:
-        try:
-            chunk = client_socket.recv(chunk_size * 4)
-            if not chunk:
-                logger.info("No more data received, ending stream processing")
+    def is_key_pressed():
+        if select.select([sys.stdin], [], [], 0)[0]:
+            key = sys.stdin.read(1)
+            return key
+        return None
+    
+    old_settings = termios.tcgetattr(sys.stdin)
+    try:
+        tty.setcbreak(sys.stdin.fileno())
+        
+        logger.debug(f"Starting continuous stream processing using LNB band: {lnb_band}")
+        data_buffer = np.array([], dtype=np.complex64)
+        chunk_size = 8192
+        inject_wow = False
+        consecutive_empty_reads = 0
+        max_empty_reads = 3
+        
+        while True:
+            try:
+                key = is_key_pressed()
+                if key == 'w':
+                    logger.info("WOW Signal injection triggered!")
+                    inject_wow = True
+                
+                chunk = client_socket.recv(chunk_size * 4)
+                if not chunk:
+                    consecutive_empty_reads += 1
+                    logger.warning(f"No samples received. Empty read count: {consecutive_empty_reads}")
+                    
+                    if consecutive_empty_reads >= max_empty_reads:
+                        logger.info("Connection appears dead, initiating reconnection...")
+                        client_socket.close()
+                        client_socket = connect_to_server()
+                        consecutive_empty_reads = 0
+                    continue
+
+                consecutive_empty_reads = 0
+                samples = np.frombuffer(chunk, dtype=np.complex64)
+                data_buffer = np.append(data_buffer, samples)
+
+                while len(data_buffer) >= chunk_size:
+                    process_chunk = data_buffer[:chunk_size]
+                    processed_samples = remove_dc_offset(process_chunk)
+                    processed_samples = remove_lnb_effect(process_chunk, fs, notch_freq, notch_width, lnb_band)
+                    processed_samples = denoise_signal(processed_samples)
+
+                    if inject_wow:
+                        processed_samples = inject_wow_signal(processed_samples)
+                        inject_wow = False
+                    
+                    prediction_samples = np.abs(processed_samples)
+                    signal_strength = 20 * np.log10(np.mean(np.abs(processed_samples)) + 1e-10)
+
+                    fft_magnitude, fft_freq, fft_data, fft_phase, fft_power = process_fft(cp.asarray(processed_samples), chunk_size, fs)
+
+                    detection, confidence_value = predict_signal(model, prediction_samples)
+                    
+                    web_data = {
+                        'timestamp': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        'frequency': f"{freq_start/1e6:.2f} MHz",
+                        'signal_strength': f"{signal_strength:.2f} dB",
+                        'status': f"Active - Detection Confidence: {confidence_value*100:.2f}%",
+                        'processed_samples': processed_samples.tolist(),
+                        'fft_data': fft_data.tolist(),
+                        'fft_freq': (fft_freq + freq_start/1e6).tolist(),
+                        'fft_magnitude': fft_magnitude.tolist(),
+                        'fft_phase': fft_phase.tolist(),
+                        'fft_power': fft_power.tolist(),
+                        'fft_power_db': (10 * np.log10(fft_power + 1e-10)).tolist(),
+                        'fft_power_db_normalized': (10 * np.log10((fft_power + 1e-10) / np.max(fft_power + 1e-10))).tolist()
+                    }
+
+                    app.config['LATEST_DATA'] = web_data
+                    
+                    if detection:
+                        logger.info("WOW Signal detected!")
+                        timestamp = datetime.datetime.now()
+                        save_detected_signal(processed_samples, timestamp, output_dir)
+                        plot_signal_strength(processed_samples, output_dir, timestamp)
+                        plot_signal_analysis(processed_samples, fs, output_dir, timestamp)
+                        plot_spectrogram(processed_samples, fs, chunk_size, output_dir, timestamp)
+
+                    data_buffer = data_buffer[chunk_size:]
+
+            except (ConnectionError, socket.error) as e:
+                logger.error(f"Stream error: {e}")
+                client_socket.close()
+                client_socket = connect_to_server()
+                continue
+            except KeyboardInterrupt:
+                logger.info("Stream processing interrupted by user")
                 break
-
-            samples = np.frombuffer(chunk, dtype=np.complex64)
-            data_buffer = np.append(data_buffer, samples)
-
-            while len(data_buffer) >= chunk_size:
-                process_chunk = data_buffer[:chunk_size]
-                processed_samples = remove_lnb_effect(process_chunk, fs, notch_freq, notch_width, lnb_band)
-                
-                # processed_samples = inject_wow_signal(processed_samples)
-                
-                prediction_samples = np.abs(processed_samples)
-                signal_strength = np.mean(np.abs(processed_samples))
-                signal_no_dc = processed_samples - np.mean(processed_samples)
-                fft_magnitude = np.abs(np.fft.fft(signal_no_dc))
-                fft_freq = np.fft.fftshift(np.fft.fftfreq(chunk_size, 1/fs))
-                fft_data = np.fft.fftshift(np.abs(np.fft.fft(processed_samples)))
-                fft_phase = np.fft.fftshift(np.angle(np.fft.fft(processed_samples)))
-                fft_power = np.fft.fftshift(np.abs(np.fft.fft(processed_samples))**2)
-              
-              
-                detection, confidence_value = predict_signal(model, prediction_samples)
-                
-                web_data = {
-                    'timestamp': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    'frequency': f"{freq_start/1e6:.2f} MHz",
-                    'signal_strength': f"{signal_strength:.2f} dB",
-                    'status': f"Active - Detection Confidence: {confidence_value*100:.2f}%",
-                    'processed_samples': processed_samples.tolist(),
-                    'fft_data': fft_data.tolist(),
-                    'fft_freq': (fft_freq + freq_start/1e6).tolist(),
-                    'fft_magnitude': fft_magnitude.tolist(),
-                    'fft_phase': fft_phase.tolist(),
-                    'fft_power': fft_power.tolist(),
-                    'fft_power_db': (10 * np.log10(fft_power)).tolist(),
-                    'fft_power_db_normalized': (10 * np.log10(fft_power / np.max(fft_power))).tolist()
-                }
-
-                
-                app.config['LATEST_DATA'] = web_data
-                
-                if detection:
-                    logger.info("WOW Signal detected!")
-                    timestamp = datetime.datetime.now()
-                    save_detected_signal(processed_samples, timestamp, output_dir)
-                    plot_signal_strength(processed_samples, output_dir,timestamp)
-                    plot_signal_analysis(processed_samples, fs, output_dir, timestamp)
-                    plot_spectrogram(processed_samples, fs, chunk_size, output_dir, timestamp)
-
-                
-                data_buffer = data_buffer[chunk_size:]
-
-        except KeyboardInterrupt:
-            logger.info("Stream processing interrupted by user")
-            break
-        except Exception as e:
-            logger.error(f"Stream processing error: {e}")
-            break
+            except Exception as e:
+                logger.error(f"Stream processing error: {e}")
+                client_socket.close()
+                client_socket = connect_to_server()
+                continue
     
-    client_socket.close()
+    finally:
+        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+        client_socket.close()
+
+
 
 
 
@@ -362,22 +467,44 @@ def save_detected_signal(processed_samples, timestamp, output_dir, freq_start=14
 
 
 
-def inject_wow_signal(samples, amplitude=4.0):
-    """Inject a wow signal pattern with correct data type"""
+def inject_wow_signal(samples, amplitude=25.0):
+    """Inject the classic 1977 WOW signal pattern"""
     t = np.arange(len(samples))
-    base_signal = amplitude * np.sin(2 * np.pi * 0.01 * t)
-    modulation = np.sin(2 * np.pi * 0.001 * t)
-    wow_signal = base_signal * (1 + 0.5 * modulation)
+    
+    # Enhanced WOW signal characteristics
+    center_freq = 0.01
+    drift_rate = 0.003
+    
+    # Stronger bell-shaped intensity curve
+    intensity = 2.0 * np.exp(-(t - len(t)/2)**2 / (len(t)/4)**2)
+    
+    # Sharper frequency drift
+    freq_drift = center_freq + drift_rate * (t - len(t)/2) / len(t)
+    wow_signal = amplitude * intensity * np.sin(2 * np.pi * freq_drift * t)
+    
+    # Enhanced narrowband characteristics
+    wow_signal = wow_signal * np.exp(1j * 2 * np.pi * freq_drift * t)
+    
+    # Add phase coherence
+    phase_coherence = np.exp(1j * np.pi/3)
+    wow_signal = wow_signal * phase_coherence
     
     return samples.astype(np.complex64) + wow_signal.astype(np.complex64)
 
 
 def main():
+        # Set threading configuration at startup
+    tf.config.threading.set_intra_op_parallelism_threads(8)
+    tf.config.threading.set_inter_op_parallelism_threads(8)
+    tf.keras.mixed_precision.set_global_policy('mixed_float16')
+    
+
     parser = argparse.ArgumentParser(description='Process continuous SDR stream.')
     parser.add_argument('-o', '--output-dir', type=str, default='output', help='Directory to save output files')
     parser.add_argument('--host', type=str, default='localhost', help='Server host address')
     parser.add_argument('--port', type=int, default=8888, help='Server port')
     parser.add_argument('--band', choices=['low', 'high'], default='low', help='LNB band selection')
+    parser.add_argument('--path', type=str, default='data', help='Path to csv file')
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -385,16 +512,22 @@ def main():
     lnb_band = LNB_LOW if args.band == 'low' else LNB_HIGH
     logger.debug(f"Selected LNB band: {lnb_band}")
     
-    weights_path = os.path.join('models', 'signal_classifier.weights.h5')
-    model = create_model()
-    
-    if os.path.exists(weights_path):
-        load_model_weights(model, weights_path)
+    state_dir = os.path.join('models', 'full_state')
+    if os.path.exists(os.path.join(state_dir, 'full_model.keras')):
+        model = tf.keras.models.load_model(os.path.join(state_dir, 'full_model.keras'))
+        with open(os.path.join(state_dir, 'bn_states.json'), 'r') as f:
+            bn_states = json.load(f)
+        for layer in model.layers:
+            if isinstance(layer, tf.keras.layers.BatchNormalization):
+                layer.moving_mean.assign(np.array(bn_states[layer.name]['mean']))
+                layer.moving_variance.assign(np.array(bn_states[layer.name]['variance']))
     else:
-        train_model(model)
+        model = create_model()
+        train_model(model, args.path)
     
     client_socket = connect_to_server(args.host, args.port)
     process_continuous_stream(client_socket, model, args.output_dir, lnb_band)
+
 
 if __name__ == "__main__":
     from threading import Thread
