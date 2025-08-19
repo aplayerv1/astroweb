@@ -66,13 +66,20 @@ def generate_wow_signals(chunk_size=8192):
     wow_signals = []
     
     for _ in range(4):
-        intensity = 2.0 * cp.exp(-(t - len(t)/2)**2 / (len(t)/4)**2)
+        # Gaussian envelope
+        intensity = 2.0 * cp.exp(-((t - chunk_size / 2) ** 2) / (chunk_size / 4) ** 2)
+        
+        # Frequency drift
         drift_rate = 0.003
-        freq = 0.01
-        freq_drift = freq + drift_rate * (t - len(t)/2) / len(t)
-        signal = intensity * cp.sin(2 * cp.pi * freq_drift * t)
-        signal = signal * cp.exp(1j * 2 * cp.pi * freq_drift * t)
-        wow_signals.append(cp.abs(signal))
+        base_freq = 0.01
+        freq_drift = base_freq + drift_rate * (t - chunk_size / 2) / chunk_size
+        
+        # Complex Wow! signal
+        phase = 2 * cp.pi * freq_drift * t
+        signal = intensity * cp.exp(1j * phase)
+        
+        # Return absolute value (real power envelope), or real part if needed
+        wow_signals.append(cp.asnumpy(cp.abs(signal)).astype(np.float32))
     
     return wow_signals
 
