@@ -11,322 +11,281 @@
     <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
     <script src="https://aladin.u-strasbg.fr/AladinLite/api/v2/latest/aladin.min.js"></script>
     <style>
-        body {
-            background-color: #1a1a1a;
-            color: #ffffff;
-        }
-        .dashboard-card {
-            background-color: #2d2d2d;
-            border-radius: 10px;
-            padding: 20px;
-            margin: 10px;
-            box-shadow: 0 4px 8px rgba(0,0,0,0.2);
-        }
-        .value-display {
-            font-size: 24px;
-            font-weight: bold;
-            color: #00ff00;
-        }
-        .log-container {
-            background-color: #000000;
-            padding: 15px;
-            border-radius: 5px;
-            font-family: monospace;
-            height: 300px;
-            overflow-y: auto;
-        }
-        .sky-map-container {
-            width: 100%;
-            height: 300px;
-            border-radius: 5px;
-            overflow: hidden;
-            margin: 10px 0;
-        }
-
+        body { background-color: #1a1a1a; color: #ffffff; }
+        .dashboard-card { background-color: #2d2d2d; border-radius: 10px; padding: 20px; margin: 10px; box-shadow: 0 4px 8px rgba(0,0,0,0.2); }
+        .value-display { font-size: 24px; font-weight: bold; color: #00ff00; }
+        .log-container { background-color: #000000; padding: 15px; border-radius: 5px; font-family: monospace; height: 300px; overflow-y: auto; }
+        .sky-map-container { width: 100%; height: 300px; border-radius: 5px; overflow: hidden; margin: 10px 0; }
     </style>
 </head>
 <body>
-    <div class="container-fluid mt-4">
-        <h1 class="text-center mb-4">Radio Astronomy Observatory</h1>
+<div class="container-fluid mt-4">
+    <h1 class="text-center mb-4">Radio Astronomy Observatory</h1>
+    
+    <div class="row">
+        <div class="col-md-3">
+            <div class="dashboard-card">
+                <h3>Signal Strength</h3>
+                <div class="value-display" id="signal-strength">--</div>
+                <canvas id="signalChart"></canvas>
+            </div>
+        </div>
         
-        <div class="row">
-            <div class="col-md-4">
-                <div class="dashboard-card">
-                    <h3>Signal Strength</h3>
-                    <div class="value-display" id="signal-strength">--</div>
-                    <canvas id="signalChart"></canvas>
-                </div>
-            </div>
-            
-            <div class="col-md-4">
-                <div class="dashboard-card">
-                    <h3>Sky Position</h3>
-                    <div class="value-display" id="frequency">--</div>
-                    <div class="sky-map-container">
-                        <div id="aladin-lite-div" style="width: 100%; height: 100%;"></div>
-                    </div>
-                    <div class="mt-2">                        
-                    </div>
-                </div>
-            </div>
-            
-            <div class="col-md-4">
-                <div class="dashboard-card">
-                    <h3>System Status</h3>
-                    <div class="value-display" id="status">--</div>
+        <div class="col-md-3">
+            <div class="dashboard-card">
+                <h3>Sky Position</h3>
+                <div class="value-display" id="frequency">--</div>
+                <div class="sky-map-container">
+                    <div id="aladin-lite-div" style="width: 100%; height: 100%;"></div>
                 </div>
             </div>
         </div>
 
-        <div class="row mt-4">
-            <div class="col-md-6">
-                <div class="dashboard-card">
-                    <h3>FFT Analysis</h3>
-                    <canvas id="fftChart"></canvas>
-                </div>
-            </div>
-            <div class="col-md-6">
-                <div class="dashboard-card">
-                    <h3>Power Spectrum</h3>
-                    <canvas id="powerChart"></canvas>
-                </div>
+        
+        <div class="col-md-3">
+            <div class="dashboard-card">
+                <h3>System Status</h3>
+                <div class="value-display" id="status">--</div>
+                <h3>Detection Confidence</h3>
+                <div class="value-display" id="confidence">--</div>
+
             </div>
         </div>
+    </div>
 
-        <div class="row mt-4">
-            <div class="col-12">
-                <div class="dashboard-card">
-                    <h3>Live Spectrogram</h3>
-                    <canvas id="spectrogramCanvas" style="width: 100%; height: 500px;"></canvas>
-                </div>
+    <div class="row mt-4">
+        <div class="col-md-6">
+            <div class="dashboard-card">
+                <h3>FFT Analysis</h3>
+                <canvas id="fftChart"></canvas>
             </div>
         </div>
+        <div class="col-md-6">
+            <div class="dashboard-card">
+                <h3>Power Spectrum</h3>
+                <canvas id="powerChart"></canvas>
+            </div>
+        </div>
+    </div>
 
-    <script>
-        // Sky position calculations
-        function calculatePointingCoordinates(lat, lon, azimuth) {
-            const LST = moment().utc().hours() + lon/15;
-            const lat_rad = lat * Math.PI/180;
-            const az_rad = azimuth * Math.PI/180;
-            
-            const alt = 90 - lat_rad;
-            const ra = LST + Math.atan2(Math.sin(az_rad), 
-                                    Math.cos(az_rad)*Math.sin(lat_rad) - 
-                                    Math.tan(alt)*Math.cos(lat_rad)) * 12/Math.PI;
-            const dec = Math.asin(Math.sin(lat_rad)*Math.sin(alt) + 
-                                Math.cos(lat_rad)*Math.cos(alt)*Math.cos(az_rad)) * 180/Math.PI;
-            
-            return {ra: ra, dec: dec};
+    <div class="row mt-4">
+        <div class="col-12">
+            <div class="dashboard-card">
+                <h3>Live Spectrogram</h3>
+                <canvas id="spectrogramCanvas" style="width: 100%; height: 500px;"></canvas>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    // Aladin sky map
+    let aladin = A.aladin('#aladin-lite-div', {
+        survey: "P/DSS2/color",
+        fov: 5,
+        cooFrame: 'equatorial',
+        showReticle: false,
+        showZoomControl: false,
+        showFullscreenControl: false,
+        showLayersControl: false,
+        showGotoControl: false
+    });
+
+    function calculatePointingCoordinates(lat, lon, azimuth) {
+        const LST = moment().utc().hours() + lon/15;
+        const lat_rad = lat * Math.PI/180;
+        const az_rad = azimuth * Math.PI/180;
+        const alt = 90 - lat_rad;
+        const ra = LST + Math.atan2(Math.sin(az_rad), 
+                        Math.cos(az_rad)*Math.sin(lat_rad) - 
+                        Math.tan(alt)*Math.cos(lat_rad)) * 12/Math.PI;
+        const dec = Math.asin(Math.sin(lat_rad)*Math.sin(alt) + 
+                        Math.cos(lat_rad)*Math.cos(alt)*Math.cos(az_rad)) * 180/Math.PI;
+        return {ra: ra, dec: dec};
+    }
+
+    function updateSkyPosition() {
+        const coords = calculatePointingCoordinates(41.604730, -8.464160, 30);
+        aladin.gotoRaDec(coords.ra, coords.dec);
+        aladin.removeLayers();
+        aladin.addMarker(coords.ra, coords.dec, {
+            color: '#00ff00',
+            label: 'Telescope FOV',
+            popupTitle: 'Current Pointing',
+            popupDesc: `RA: ${coords.ra.toFixed(2)}h, Dec: ${coords.dec.toFixed(2)}°`
+        });
+    }
+
+    // Charts
+    const signalChart = new Chart(document.getElementById('signalChart').getContext('2d'), {
+        type: 'line',
+        data: { labels: [], datasets: [{ label: 'Signal Strength (dB)', data: [], borderColor: '#00ff00', tension: 0.1 }] },
+        options: { responsive: true, scales: { y: { beginAtZero: true } } }
+    });
+
+    const fftChart = new Chart(document.getElementById('fftChart').getContext('2d'), {
+        type: 'line',
+        data: { labels: [], datasets: [{ label: 'FFT Magnitude', data: [], borderColor: '#00ff00' }] },
+        options: { responsive: true, scales: { y: { beginAtZero: true } } }
+    });
+
+    const powerChart = new Chart(document.getElementById('powerChart').getContext('2d'), {
+        type: 'line',
+        data: { labels: [], datasets: [{ label: 'Power (dB)', data: [], borderColor: '#ff0000' }] },
+        options: { responsive: true }
+    });
+
+    // Spectrogram
+    const spectrogramCanvas = document.getElementById('spectrogramCanvas');
+    const renderer = new THREE.WebGLRenderer({ canvas: spectrogramCanvas });
+    const scene = new THREE.Scene();
+    const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 10);
+
+    const spectrogramWidth = 1024;
+    const spectrogramHeight = 512;
+    const spectrogramData = new Uint8Array(spectrogramWidth * spectrogramHeight * 3);
+    const texture = new THREE.DataTexture(spectrogramData, spectrogramWidth, spectrogramHeight, THREE.RGBFormat);
+    texture.needsUpdate = true;
+
+    const geometry = new THREE.PlaneGeometry(2, 2);
+    const material = new THREE.MeshBasicMaterial({ map: texture });
+    const mesh = new THREE.Mesh(geometry, material);
+    scene.add(mesh);
+    camera.position.z = 1;
+
+    function updateSpectrogram(fftMagnitude) {
+        if (!fftMagnitude || fftMagnitude.length === 0) return;
+
+        // Shift all rows up by one (move everything up to make room for newest row)
+        spectrogramData.copyWithin(0, spectrogramWidth * 3, spectrogramData.length);
+
+        // Downsample FFT to fit texture width (ensure step >= 1)
+        const step = Math.max(1, Math.floor(fftMagnitude.length / spectrogramWidth));
+        const lastRow = (spectrogramHeight - 1) * spectrogramWidth * 3;
+
+        // Build a downsampled array and use log-scale (dB) normalization for better visual dynamic range
+        const down = new Array(spectrogramWidth);
+        for (let i = 0; i < spectrogramWidth; i++) {
+            const srcIdx = Math.min(i * step, fftMagnitude.length - 1);
+            down[i] = Math.abs(fftMagnitude[srcIdx]) || 0;
         }
 
-        // Initialize Aladin with enhanced overlays
-        let aladin = A.aladin('#aladin-lite-div', {
-            survey: "P/DSS2/color",
-            fov: 5,
-            cooFrame: 'equatorial',
-            showReticle: false,
-            showZoomControl: false,
-            showFullscreenControl: false,
-            showLayersControl: false,
-            showGotoControl: false
-        });
+        // Convert to dB-like values to compress dynamic range
+        const logVals = down.map(v => 20 * Math.log10(v + 1e-12));
+        const maxVal = Math.max(...logVals);
+        const minVal = Math.min(...logVals);
+        const range = Math.max(maxVal - minVal, 1e-6);
 
-        // Add Simbad catalog for named objects
-        aladin.addCatalog(A.catalogFromSimbad('', {onClick: 'showPopup'}));
-        
-        // Add catalog overlay
-        let hipscat = A.catalogHiPS('https://axel.u-strasbg.fr/HiPSCatService/I/345/gaia2');
-        aladin.addCatalog(hipscat);
-
-        // Update pointing
-        function updateSkyPosition() {
-            const coords = calculatePointingCoordinates(41.604730, -8.464160, 30);
-            aladin.gotoRaDec(coords.ra, coords.dec);
-            
-            aladin.removeLayers();
-            aladin.addMarker(coords.ra, coords.dec, {
-                color: '#00ff00',
-                label: 'Telescope FOV',
-                popupTitle: 'Current Pointing',
-                popupDesc: `RA: ${coords.ra.toFixed(2)}h, Dec: ${coords.dec.toFixed(2)}°`
-            });
+        for (let i = 0; i < spectrogramWidth; i++) {
+            const normVal = (logVals[i] - minVal) / range;
+            const intensity = Math.max(0, Math.min(1, normVal));
+            const idx = lastRow + i * 3;
+            const pix = Math.round(intensity * 255);
+            spectrogramData[idx] = pix;
+            spectrogramData[idx + 1] = pix;
+            spectrogramData[idx + 2] = pix;
         }
 
-        // Initialize charts
-        const signalCtx = document.getElementById('signalChart').getContext('2d');
-        const fftCtx = document.getElementById('fftChart').getContext('2d');
-        const powerCtx = document.getElementById('powerChart').getContext('2d');
+        texture.needsUpdate = true;
+    }
 
-        const signalChart = new Chart(signalCtx, {
-            type: 'line',
-            data: {
-                labels: [],
-                datasets: [{
-                    label: 'Signal Strength (dB)',
-                    data: [],
-                    borderColor: '#00ff00',
-                    tension: 0.1
-                }]
-            },
-            options: {
-                responsive: true,
-                scales: {
-                    y: {
-                        beginAtZero: true
-                    }
-                }
-            }
-        });
+    function updateCharts(data) {
+        document.getElementById('frequency').textContent = data.frequency;
+        document.getElementById('signal-strength').textContent = data.signal_strength;
+        document.getElementById('confidence').textContent = (data.confidence*100).toFixed(1) + "%";
 
-        const fftChart = new Chart(fftCtx, {
-            type: 'line',
-            data: {
-                labels: [],
-                datasets: [{
-                    label: 'FFT Magnitude',
-                    data: [],
-                    borderColor: '#00ff00'
-                }]
-            },
-            options: {
-                responsive: true,
-                scales: {
-                    y: {
-                        beginAtZero: true
-                    }
-                }
-            }
-        });
-
-        const powerChart = new Chart(powerCtx, {
-            type: 'line',
-            data: {
-                labels: [],
-                datasets: [{
-                    label: 'Power (dB)',
-                    data: [],
-                    borderColor: '#ff0000'
-                }]
-            },
-            options: {
-                responsive: true
-            }
-        });
-
-        // Initialize WebGL spectrogram
-        const spectrogramCanvas = document.getElementById('spectrogramCanvas');
-        const renderer = new THREE.WebGLRenderer({ canvas: spectrogramCanvas });
-        const scene = new THREE.Scene();
-        const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 10);
-        
-        const spectrogramWidth = 1024;
-        const spectrogramHeight = 512;
-        const spectrogramData = new Uint8Array(spectrogramWidth * spectrogramHeight * 3);
-        const texture = new THREE.DataTexture(
-            spectrogramData, 
-            spectrogramWidth, 
-            spectrogramHeight, 
-            THREE.RGBFormat
-        );
-
-        const geometry = new THREE.PlaneGeometry(2, 2);
-        const material = new THREE.MeshBasicMaterial({ map: texture });
-        const mesh = new THREE.Mesh(geometry, material);
-        scene.add(mesh);
-        camera.position.z = 1;
-
-        function updateSpectrogram(fftData) {
-            for (let i = 0; i < spectrogramHeight - 1; i++) {
-                for (let j = 0; j < spectrogramWidth; j++) {
-                    const idx = (i * spectrogramWidth + j) * 3;
-                    const nextIdx = ((i + 1) * spectrogramWidth + j) * 3;
-                    spectrogramData[idx] = spectrogramData[nextIdx];
-                    spectrogramData[idx + 1] = spectrogramData[nextIdx + 1];
-                    spectrogramData[idx + 2] = spectrogramData[nextIdx + 2];
-                }
-            }
-            
-            const lastRow = (spectrogramHeight - 1) * spectrogramWidth * 3;
-            for (let i = 0; i < spectrogramWidth; i++) {
-                const value = Math.min(255, Math.max(0, fftData[i] * 255));
-                spectrogramData[lastRow + i * 3] = value;
-                spectrogramData[lastRow + i * 3 + 1] = value;
-                spectrogramData[lastRow + i * 3 + 2] = value;
-            }
-            
-            texture.needsUpdate = true;
-            renderer.render(scene, camera);
+        // System status
+        if (data.system_status) {
+            const statusText = `CPU: ${data.system_status.cpu_usage.toFixed(1)}%, ` +
+                               `GPU: ${data.system_status.gpu_available ? 'Yes' : 'No'}, ` +
+                               `Memory: ${data.system_status.memory_usage.toFixed(1)}%`;
+            document.getElementById('status').textContent = statusText;
         }
 
-        function updateCharts(data) {
-            document.getElementById('frequency').textContent = data.frequency;
-            document.getElementById('signal-strength').textContent = data.signal_strength;
-            document.getElementById('status').textContent = data.status;
+        // Signal chart
+        signalChart.data.labels.push(new Date().toLocaleTimeString());
+        // Prefer the numeric `signal_strength_db` when provided; fall back to parsing the
+        // formatted `signal_strength` string (e.g. "-12.34 dB"). If still invalid, push 0.
+        let pushVal = 0;
+        if (typeof data.signal_strength_db === 'number') {
+            pushVal = data.signal_strength_db;
+        } else {
+            const parsed = parseFloat(data.signal_strength);
+            pushVal = isNaN(parsed) ? 0 : parsed;
+        }
+        signalChart.data.datasets[0].data.push(pushVal);
+        if (signalChart.data.labels.length > 60) {
+            signalChart.data.labels.shift();
+            signalChart.data.datasets[0].data.shift();
+        }
+        signalChart.update();
 
-            signalChart.data.labels.push(new Date().toLocaleTimeString());
-            signalChart.data.datasets[0].data.push(parseFloat(data.signal_strength));
-            if (signalChart.data.labels.length > 60) {
-                signalChart.data.labels.shift();
-                signalChart.data.datasets[0].data.shift();
-            }
-            signalChart.update();
-
+        // FFT chart
+        if (data.fft_freq && data.fft_magnitude) {
             fftChart.data.labels = data.fft_freq;
             fftChart.data.datasets[0].data = data.fft_magnitude;
             fftChart.update();
+        }
 
+        // Power chart
+        if (data.fft_freq && data.fft_power_db_normalized && data.fft_power_db_normalized.length > 0) {
             powerChart.data.labels = data.fft_freq;
-            powerChart.data.datasets[0].data = data.fft_power_db_normalized;
+            powerChart.data.datasets[0].data = data.fft_power_db_normalized.slice(-1)[0];
             powerChart.update();
-
-            if (data.fft_data) {
-                updateSpectrogram(data.fft_data);
-            }
         }
 
-        function resizeRenderer() {
-            const canvas = renderer.domElement;
-            const width = canvas.clientWidth;
-            const height = canvas.clientHeight;
-            const needResize = canvas.width !== width || canvas.height !== height;
-            if (needResize) {
-                renderer.setSize(width, height, false);
-            }
-            return needResize;
+        // Buffer stats
+        if (data.buffer_stats) {
+            const bufferCountElem = document.getElementById('buffer-count');
+            const bufferRateElem = document.getElementById('buffer-rate');
+            if (bufferCountElem) bufferCountElem.textContent = `${data.buffer_stats.count} / ${data.buffer_stats.capacity}`;
+            if (bufferRateElem) bufferRateElem.textContent = `Detection Rate: ${data.buffer_stats.detection_rate}`;
         }
 
-        function animate() {
-            requestAnimationFrame(animate);
-            if (resizeRenderer()) {
-                camera.aspect = renderer.domElement.width / renderer.domElement.height;
-                camera.updateProjectionMatrix();
-            }
-            renderer.render(scene, camera);
+        // Update spectrogram
+        if (data.fft_magnitude) {
+            updateSpectrogram(data.fft_magnitude);
         }
-        animate();
+    }
 
-        // Data updates
-        function fetchData() {
-            fetch('/api/signal')
-                .then(response => response.json())
-                .then(data => updateCharts(data));
+    function resizeRenderer() {
+        const canvas = renderer.domElement;
+        const width = canvas.clientWidth;
+        const height = canvas.clientHeight;
+        if (canvas.width !== width || canvas.height !== height) {
+            renderer.setSize(width, height, false);
+            camera.updateProjectionMatrix();
         }
+    }
 
-        setInterval(fetchData, 1000);
-        setInterval(updateSkyPosition, 60000);
-        updateSkyPosition();
+    function animate() {
+        requestAnimationFrame(animate);
+        resizeRenderer();
+        renderer.render(scene, camera);
+    }
+    animate();
 
-        // Live logs
-        const eventSource = new EventSource('/logs');
-        eventSource.onmessage = function(event) {
-            if (event.data.trim()) {
-                const logContainer = document.getElementById('log-container');
+    function fetchData() {
+        fetch('/api/signal').then(res => res.json()).then(data => updateCharts(data));
+    }
+
+    setInterval(fetchData, 1000);
+    setInterval(updateSkyPosition, 60000);
+    updateSkyPosition();
+
+    // Live logs
+    const eventSource = new EventSource('/logs');
+    eventSource.onmessage = function(event) {
+        if (event.data.trim()) {
+            const logContainer = document.getElementById('log-container');
+            if (logContainer) {
                 const logEntry = document.createElement('div');
                 logEntry.textContent = event.data;
                 logContainer.appendChild(logEntry);
                 logContainer.scrollTop = logContainer.scrollHeight;
             }
-        };
-    </script>
+        }
+    };
+</script>
 </body>
 </html>
