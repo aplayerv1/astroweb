@@ -106,14 +106,46 @@ def get_signal():
         }
 
         # --- FFT data ---
-        # aic2.py stores it as latest_data['fft_data'] = {magnitude, frequency, power, phase}
-        # Frontend reads d.fft_data.frequency and d.fft_data.magnitude — pass it through as-is
-        # but ensure all values are plain Python lists (not numpy arrays).
-        raw_fft = latest_data.get('fft_data', {})
-        fft_freq      = _to_list(raw_fft.get('frequency', []))
-        fft_magnitude = [abs(float(v)) for v in raw_fft.get('magnitude', [])]
-        fft_power_raw = _to_list(raw_fft.get('power', []))
-        fft_phase     = _to_list(raw_fft.get('phase', []))
+        raw_fft       = latest_data.get('fft_data', {})
+        fft_freq_all  = _to_list(raw_fft.get('frequency', []))
+        fft_mag_all   = [abs(float(v)) for v in raw_fft.get('magnitude', [])]
+        fft_power_all = _to_list(raw_fft.get('power', []))
+        fft_phase_all = _to_list(raw_fft.get('phase', []))
+
+        # Zoom window derived from whatever freq_start/stop aic2.py is configured with.
+        # No hardcoding — changes in aic2.py are reflected immediately.
+        freq_start_mhz = float(latest_data.get('freq_start_mhz', 1420.0))
+        freq_stop_mhz  = float(latest_data.get('freq_stop_mhz',  1420.4))
+        center_mhz     = (freq_start_mhz + freq_stop_mhz) / 2.0
+        half_span_mhz  = (freq_stop_mhz - freq_start_mhz) / 2.0
+
+        # ?zoom=1 (default) = exact configured span
+        # ?zoom=2 = double the span for context, ?zoom=0.5 = tighter view
+        try:
+            from flask import request as _req
+            zoom_scale = float(_req.args.get('zoom', 1.0))
+        except Exception:
+            zoom_scale = 1.0
+
+        lo_mhz = center_mhz - half_span_mhz * zoom_scale
+        hi_mhz = center_mhz + half_span_mhz * zoom_scale
+
+        if fft_freq_all and len(fft_freq_all) == len(fft_mag_all):
+            indices = [i for i, f in enumerate(fft_freq_all) if lo_mhz <= f <= hi_mhz]
+        else:
+            indices = list(range(len(fft_freq_all)))
+
+        if indices:
+            fft_freq      = [fft_freq_all[i]  for i in indices]
+            fft_magnitude = [fft_mag_all[i]   for i in indices]
+            fft_power_raw = [fft_power_all[i] for i in indices] if fft_power_all else []
+            fft_phase     = [fft_phase_all[i] for i in indices] if fft_phase_all else []
+        else:
+            # Fallback: no data in zoom window — return everything
+            fft_freq      = fft_freq_all
+            fft_magnitude = fft_mag_all
+            fft_power_raw = fft_power_all
+            fft_phase     = fft_phase_all
 
         # Normalise power 0-1 for waterfall
         if fft_power_raw:
@@ -131,6 +163,9 @@ def get_signal():
             'power':     fft_power_raw,
             'phase':     fft_phase,
         }
+        snapshot['freq_start_mhz']  = freq_start_mhz
+        snapshot['freq_stop_mhz']   = freq_stop_mhz
+        snapshot['sample_rate_mhz'] = float(latest_data.get('sample_rate_mhz', 20.0))
 
         # Also keep flat aliases for backwards compat
         snapshot['fft_freq']      = fft_freq

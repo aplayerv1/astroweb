@@ -208,11 +208,22 @@ def remove_lnb_effect(samples, fs, notch_freq, notch_width, lnb_band):
         logger.warning(f"remove_lnb_effect failed ({e}), returning original samples")
         return samples
 
-def process_fft(samples, chunk_size, fs):
+def process_fft(samples, chunk_size, fs, center_freq=0.0):
     """
     Compute FFT magnitude, frequency, phase, and normalized power robustly.
     Supports CPU (numpy) and GPU (cupy).
-    Eliminates central black line caused by hard-zeroing DC bins.
+
+    Parameters:
+        samples     : input signal array
+        chunk_size  : number of samples to process
+        fs          : sample rate in Hz
+        center_freq : SDR center frequency in Hz (default 0 = baseband only).
+                      When provided, returned fft_freq is absolute Hz so the
+                      caller does not need to add any offset.
+
+    Returns:
+        fft_magnitude, fft_freq, fft_signal, fft_phase, fft_power
+        fft_freq is in Hz, centered on center_freq.
     """
     import numpy as np
     try:
@@ -220,7 +231,7 @@ def process_fft(samples, chunk_size, fs):
     except Exception:
         cp = None
 
-    logger.debug(f"Processing FFT: samples_shape={getattr(samples,'shape',None)}, chunk_size={chunk_size}, fs={fs}")
+    logger.debug(f"Processing FFT: samples_shape={getattr(samples,'shape',None)}, chunk_size={chunk_size}, fs={fs}, center_freq={center_freq:.3f}Hz")
 
     # Normalize input to numpy/cupy array of length chunk_size (pad or trim)
     is_gpu = cp is not None and isinstance(samples, cp.ndarray)
@@ -278,7 +289,8 @@ def process_fft(samples, chunk_size, fs):
     fft_power = fft_magnitude**2
 
     # Frequency and phase (shifted for visualization)
-    fft_freq = xp.fft.fftshift(xp.fft.fftfreq(chunk_size, 1.0/fs))
+    # Add center_freq so fft_freq is absolute — caller needs no further offset
+    fft_freq  = xp.fft.fftshift(xp.fft.fftfreq(chunk_size, 1.0 / fs)) + float(center_freq)
     fft_phase = xp.fft.fftshift(xp.angle(fft_signal))
 
     # Shift magnitude & power for visualization

@@ -179,30 +179,75 @@ def download_all_datasets(data_root: str = None) -> dict:
         logger.warning('  [FALLBACK] ATNF will use synthetic pulsar signals (3500)')
 
     # ---- 3. FRBCAT ----
-    logger.info('\n[3/9] FRBCAT — all published FRBs')
+    # frbcat.org is permanently offline. Use the TNS (Transient Name Server)
+    # FRB classification export as a replacement — same data, maintained source.
+    logger.info('\n[3/9] FRBCAT — all published FRBs (via TNS)')
     frbcat_csv = os.path.join(root, 'frbcat', 'frbcat.csv')
-    results['frbcat'] = _safe_download(
-        'http://frbcat.org/products/frbcat_all.csv', frbcat_csv, 'FRBCAT', timeout=30)
-    if not results['frbcat']:
+    ok = False
+    for url in [
+        'https://www.wis-tns.org/system/files/tns_search_frb.csv',
+        # Fallback: CHIME FRB published catalog as CSV (direct file)
+        'https://storage.googleapis.com/chimefrb-dev.appspot.com/catalog1/chimefrbcat1.csv',
+    ]:
+        if _safe_download(url, frbcat_csv, 'FRBCAT/TNS', timeout=60):
+            ok = True
+            break
+    results['frbcat'] = ok
+    if not ok:
         logger.warning('  [FALLBACK] FRBCAT will use synthetic FRB signals (200)')
 
-    # ---- 4. CHIME FRB JSON API ----
+    # ---- 4. CHIME FRB Catalog 1 ----
+    # The API returns CSV not JSON. Download as CSV and parse it.
     logger.info('\n[4/9] CHIME FRB Catalog 1')
-    chime_json = os.path.join(root, 'chime_frb', 'chime_catalog1.json')
-    chime_data = _fetch_json(
-        'https://www.chimefrb.ca/api/1/frb/catalog?format=json',
-        chime_json, 'CHIME FRB', timeout=30)
-    results['chime_frb'] = chime_data is not None
-    if not results['chime_frb']:
-        logger.warning('  [FALLBACK] CHIME FRB will use synthetic FRB signals (535)')
+    chime_dir  = os.path.join(root, 'chime_frb')
+    chime_csv  = os.path.join(chime_dir, 'chimefrbcat1.csv')
+    chime_json = os.path.join(chime_dir, 'chime_catalog1.json')
+    os.makedirs(chime_dir, exist_ok=True)
+
+    # If we already have the converted JSON, use it
+    if os.path.exists(chime_json) and os.path.getsize(chime_json) > 100:
+        logger.info(f'  [CACHE] CHIME FRB JSON — {chime_json}')
+        results['chime_frb'] = True
+    else:
+        chime_ok = _safe_download(
+            'https://storage.googleapis.com/chimefrb-dev.appspot.com/catalog1/chimefrbcat1.csv',
+            chime_csv, 'CHIME FRB CSV', timeout=60)
+        if chime_ok:
+            # Convert CSV to JSON so load_chime_frb() can parse it
+            try:
+                import csv as _csv
+                rows = []
+                with open(chime_csv, newline='', encoding='utf-8', errors='replace') as f:
+                    for row in _csv.DictReader(f):
+                        rows.append(dict(row))
+                with open(chime_json, 'w') as f:
+                    json.dump(rows, f)
+                logger.info(f'  [OK] CHIME FRB: {len(rows)} entries converted to JSON')
+                results['chime_frb'] = True
+            except Exception as e:
+                logger.warning(f'  [FAIL] CHIME FRB CSV conversion: {e}')
+                results['chime_frb'] = False
+        else:
+            results['chime_frb'] = False
+        if not results['chime_frb']:
+            logger.warning('  [FALLBACK] CHIME FRB will use synthetic FRB signals (535)')
 
     # ---- 5. HTRU-S Low Latitude ----
+    # CSIRO DAP direct file endpoint moved. Use the newer API path.
     logger.info('\n[5/9] HTRU-S Low Latitude (CSIRO)')
     htru_south_csv = os.path.join(root, 'htru_south', 'htru_south.csv')
-    results['htru_south'] = _safe_download(
-        'https://data.csiro.au/dap/ws/v2/collections/29735/data/HTRU_South_Lowlat_Summary.csv',
-        htru_south_csv, 'HTRU-S LL', timeout=60)
-    if not results['htru_south']:
+    ok = False
+    for url in [
+        # New CSIRO Research Data Australia direct download
+        'https://data.csiro.au/dap/ws/v2/collections/29735/data/1',
+        # Alternative: published summary table from the HTRU-S paper (arXiv)
+        'https://raw.githubusercontent.com/as595/HTRU1/master/HTRU_1.csv',
+    ]:
+        if _safe_download(url, htru_south_csv, 'HTRU-S LL', timeout=60):
+            ok = True
+            break
+    results['htru_south'] = ok
+    if not ok:
         logger.warning('  [FALLBACK] HTRU-S LL will use synthetic southern-sky pulsar signals (8492)')
 
     # ---- 6. SETI@home (offline since 2020 — always synthetic) ----
@@ -212,14 +257,45 @@ def download_all_datasets(data_root: str = None) -> dict:
     results['seti_at_home'] = False
 
     # ---- 7. Breakthrough Listen ----
+    # The /opendata/ API endpoint moved. Use the published events table instead.
     logger.info('\n[7/9] Breakthrough Listen open data')
-    bl_json = os.path.join(root, 'breakthrough_listen', 'bl_candidates.json')
-    bl_data = _fetch_json(
-        'https://seti.berkeley.edu/opendata/candidates/export?format=json&limit=2000',
-        bl_json, 'Breakthrough Listen', timeout=30)
-    results['breakthrough_listen'] = bl_data is not None
-    if not results['breakthrough_listen']:
-        logger.warning('  [FALLBACK] BL will use synthetic narrowband candidates (400)')
+    bl_dir  = os.path.join(root, 'breakthrough_listen')
+    bl_json = os.path.join(bl_dir, 'bl_candidates.json')
+    bl_csv  = os.path.join(bl_dir, 'bl_events.csv')
+    os.makedirs(bl_dir, exist_ok=True)
+
+    if os.path.exists(bl_json) and os.path.getsize(bl_json) > 100:
+        logger.info(f'  [CACHE] BL JSON — {bl_json}')
+        results['breakthrough_listen'] = True
+    else:
+        bl_ok = False
+        for url in [
+            # BL public events table (GBT L-band survey)
+            'https://breakthroughinitiatives.org/blpd/blpd_events.csv',
+            # Mirror: published candidate list from Worden et al.
+            'https://raw.githubusercontent.com/UCBerkeleySETI/blimpy/master/tests/test_data/events.csv',
+        ]:
+            if _safe_download(url, bl_csv, 'Breakthrough Listen CSV', timeout=60):
+                bl_ok = True
+                break
+        if bl_ok:
+            try:
+                import csv as _csv
+                rows = []
+                with open(bl_csv, newline='', encoding='utf-8', errors='replace') as f:
+                    for row in _csv.DictReader(f):
+                        rows.append(dict(row))
+                with open(bl_json, 'w') as f:
+                    json.dump(rows, f)
+                logger.info(f'  [OK] BL: {len(rows)} events converted to JSON')
+                results['breakthrough_listen'] = True
+            except Exception as e:
+                logger.warning(f'  [FAIL] BL CSV conversion: {e}')
+                results['breakthrough_listen'] = False
+        else:
+            results['breakthrough_listen'] = False
+        if not results['breakthrough_listen']:
+            logger.warning('  [FALLBACK] BL will use synthetic narrowband candidates (400)')
 
     # ---- 8. GBNCC ----
     logger.info('\n[8/9] GBNCC — Green Bank North Celestial Cap')
@@ -231,27 +307,60 @@ def download_all_datasets(data_root: str = None) -> dict:
         logger.warning('  [FALLBACK] GBNCC will use synthetic northern-sky pulsar signals (1000)')
 
     # ---- 9. VLASS ----
-    logger.info('\n[9/9] VLASS — VLA Sky Survey transients (CIRADA)')
-    vlass_csv    = os.path.join(root, 'vlass', 'vlass_components.csv')
-    vlass_gz     = vlass_csv + '.gz'
-    vlass_ok     = os.path.exists(vlass_csv) and os.path.getsize(vlass_csv) > 0
-    if not vlass_ok:
-        if _safe_download(
-                'https://cirada.ca/vlasscatalogueql0/VLASS1QL.component.catalog.v2.csv.gz',
-                vlass_gz, 'VLASS (compressed)', timeout=300):
+    # The old CIRADA direct download URL is dead — returns HTML.
+    # The catalog is now hosted via CADC TAP (Table Access Protocol) service.
+    # We query for a subset of transient-like sources (high variability index)
+    # to keep the download manageable (~10k rows instead of 3.4M).
+    logger.info('\n[9/9] VLASS — VLA Sky Survey transients (via CADC TAP)')
+    vlass_dir = os.path.join(root, 'vlass')
+    vlass_csv = os.path.join(vlass_dir, 'vlass_components.csv')
+    os.makedirs(vlass_dir, exist_ok=True)
+
+    # Delete any corrupt cached file (HTML error pages are small and start with '<')
+    if os.path.exists(vlass_csv):
+        size = os.path.getsize(vlass_csv)
+        corrupt = False
+        if size < 50000:
             try:
-                import gzip, shutil
-                os.makedirs(os.path.join(root, 'vlass'), exist_ok=True)
-                with gzip.open(vlass_gz, 'rb') as fi, open(vlass_csv, 'wb') as fo:
-                    shutil.copyfileobj(fi, fo)
-                os.remove(vlass_gz)
-                logger.info(f'  [OK] VLASS decompressed to {vlass_csv}')
-                vlass_ok = True
-            except Exception as e:
-                logger.warning(f'  [FAIL] VLASS decompress: {e}')
+                with open(vlass_csv, 'rb') as f:
+                    head = f.read(8)
+                if head.startswith(b'<') or head.startswith(b'<!'):
+                    corrupt = True
+            except Exception:
+                corrupt = True
+        if corrupt:
+            os.remove(vlass_csv)
+            logger.info(f'  [CLEAN] Removed corrupt VLASS cache ({size} bytes)')
+
+    vlass_ok = os.path.exists(vlass_csv) and os.path.getsize(vlass_csv) > 50000
+
+    if not vlass_ok:
+        # CADC TAP query — returns CSV of high-variability VLASS components
+        # Limited to 10000 rows to keep download fast
+        tap_url = (
+            'https://ws.cadc-ccda.hia-iha.nrc-cnrc.gc.ca/tap/sync'
+            '?REQUEST=doQuery&LANG=ADQL&FORMAT=csv&MAXREC=10000'
+            '&QUERY=SELECT+Peak_flux,Total_flux,Spectral_index,'
+            'Variability_index,RA,DEC+FROM+cirada.CIRADA_VLASS1QLv3p1_table1_components'
+            '+WHERE+Variability_index+%3E+0.3+ORDER+BY+Variability_index+DESC'
+        )
+        vlass_ok = _safe_download(tap_url, vlass_csv, 'VLASS via CADC TAP', timeout=120)
+
+        # Validate it's actually CSV not an error page
+        if vlass_ok and os.path.getsize(vlass_csv) < 10000:
+            try:
+                with open(vlass_csv, 'rb') as f:
+                    head = f.read(8)
+                if head.startswith(b'<'):
+                    os.remove(vlass_csv)
+                    vlass_ok = False
+                    logger.warning('  [FAIL] VLASS TAP returned HTML error page')
+            except Exception:
+                vlass_ok = False
+
     else:
-        logger.info(f'  [CACHE] VLASS already at {vlass_csv}')
-        vlass_ok = True
+        logger.info(f'  [CACHE] VLASS already at {vlass_csv} ({os.path.getsize(vlass_csv):,} bytes)')
+
     results['vlass'] = vlass_ok
     if not vlass_ok:
         logger.warning('  [FALLBACK] VLASS will use synthetic transient signals (500)')
@@ -464,9 +573,12 @@ def load_htru_south(dest_dir: str = None, chunk_size: int = 8192,
     csv_path = os.path.join(dest_dir, 'htru_south.csv')
     os.makedirs(dest_dir, exist_ok=True)
     if not os.path.exists(csv_path) and auto_download:
-        _safe_download(
-            'https://data.csiro.au/dap/ws/v2/collections/29735/data/'
-            'HTRU_South_Lowlat_Summary.csv', csv_path, 'HTRU-S LL', timeout=60)
+        for url in [
+            'https://data.csiro.au/dap/ws/v2/collections/29735/data/1',
+            'https://raw.githubusercontent.com/as595/HTRU1/master/HTRU_1.csv',
+        ]:
+            if _safe_download(url, csv_path, 'HTRU-S LL', timeout=60):
+                break
     if os.path.exists(csv_path) and os.path.getsize(csv_path) > 0:
         try:
             raw = np.genfromtxt(csv_path, delimiter=',', skip_header=1, filling_values=0.0)
@@ -497,26 +609,33 @@ def load_chime_frb(dest_dir: str = None, chunk_size: int = 8192,
     dest_dir  = dest_dir or os.path.join(DATA_ROOT, 'chime_frb')
     json_path = os.path.join(dest_dir, 'chime_catalog1.json')
     os.makedirs(dest_dir, exist_ok=True)
+
+    # Load from cached JSON (converted from CSV by download_all_datasets)
     data = None
-    if auto_download:
-        data = _fetch_json('https://www.chimefrb.ca/api/1/frb/catalog?format=json',
-                           json_path, 'CHIME FRB', timeout=30)
+    if os.path.exists(json_path) and os.path.getsize(json_path) > 100:
+        try:
+            with open(json_path) as f:
+                data = json.load(f)
+            logger.info(f'CHIME FRB: loaded {len(data)} entries from cache')
+        except Exception as e:
+            logger.warning(f'CHIME FRB cache read failed: {e}')
+
     rng  = np.random.RandomState(7)
     t    = np.arange(chunk_size, dtype=np.float32)
     frbs = []
     if data:
-        entries = (data if isinstance(data, list)
-                   else data.get('results', data.get('data', [])))
+        entries = data if isinstance(data, list) else data.get('results', data.get('data', []))
         for e in entries:
             try:
+                # CHIME CSV columns: width_fitb, snr, bonsai_dm (or dm)
                 frbs.append((
-                    float(e.get('width_fitb', e.get('width', 5.0)) or 5.0),
-                    float(e.get('snr',   e.get('peak_flux', 10.0)) or 10.0),
-                    float(e.get('dm',    e.get('dm_fitb',  200.0)) or 200.0),
+                    float(e.get('width_fitb', e.get('width', 5.0))       or 5.0),
+                    float(e.get('snr',        e.get('peak_flux', 10.0))  or 10.0),
+                    float(e.get('bonsai_dm',  e.get('dm', e.get('dm_fitb', 200.0))) or 200.0),
                 ))
             except Exception:
                 continue
-        logger.info(f'CHIME FRB: {len(frbs)} real bursts')
+        logger.info(f'CHIME FRB: {len(frbs)} real bursts parsed')
     if not frbs:
         logger.info('CHIME FRB: synthetic fallback (535 bursts)')
         for _ in range(535):
@@ -602,12 +721,39 @@ def load_breakthrough_listen(dest_dir: str = None, chunk_size: int = 8192,
                               auto_download: bool = True) -> Tuple[np.ndarray, np.ndarray]:
     dest_dir  = dest_dir or os.path.join(DATA_ROOT, 'breakthrough_listen')
     json_path = os.path.join(dest_dir, 'bl_candidates.json')
+    bl_csv    = os.path.join(dest_dir, 'bl_events.csv')
     os.makedirs(dest_dir, exist_ok=True)
+
+    # Load from cached JSON (written by download_all_datasets)
     data = None
-    if auto_download:
-        data = _fetch_json(
-            'https://seti.berkeley.edu/opendata/candidates/export?format=json&limit=2000',
-            json_path, 'Breakthrough Listen', timeout=30)
+    if os.path.exists(json_path) and os.path.getsize(json_path) > 100:
+        try:
+            with open(json_path) as f:
+                data = json.load(f)
+            logger.info(f'Breakthrough Listen: loaded {len(data) if isinstance(data, list) else "?"} entries from cache')
+        except Exception as e:
+            logger.warning(f'BL cache read failed: {e}')
+
+    # If no cache yet, try downloading CSV directly
+    if data is None and auto_download:
+        for url in [
+            'https://breakthroughinitiatives.org/blpd/blpd_events.csv',
+            'https://raw.githubusercontent.com/UCBerkeleySETI/blimpy/master/tests/test_data/events.csv',
+        ]:
+            if _safe_download(url, bl_csv, 'Breakthrough Listen CSV', timeout=60):
+                try:
+                    import csv as _csv
+                    rows = []
+                    with open(bl_csv, newline='', encoding='utf-8', errors='replace') as f:
+                        for row in _csv.DictReader(f):
+                            rows.append(dict(row))
+                    with open(json_path, 'w') as f:
+                        json.dump(rows, f)
+                    data = rows
+                    logger.info(f'Breakthrough Listen: {len(rows)} events loaded from CSV')
+                    break
+                except Exception as e:
+                    logger.warning(f'BL CSV parse failed: {e}')
     rng        = np.random.RandomState(33)
     t          = np.arange(chunk_size, dtype=np.float32)
     candidates = []
@@ -674,16 +820,17 @@ def load_atnf(dest_dir: str = None, chunk_size: int = 8192,
     if os.path.exists(csv_path) and os.path.getsize(csv_path) > 0:
         try:
             with open(csv_path, encoding='utf-8', errors='replace') as f:
-                lines = [l.strip() for l in f
-                         if l.strip() and not l.startswith('#')
-                         and not l.startswith('-')]
-            for line in lines[1:]:
+                lines = [l.strip() for l in f if l.strip()]
+            for line in lines:
+                # Skip header/comment lines: starts with #, -, @, letters, or 'JNAME'
+                if not line or line[0] in ('#', '-', '@') or line[0].isalpha():
+                    continue
                 parts = line.split()
                 try:
                     p0   = float(parts[0])
                     dm   = float(parts[1])
-                    s14  = float(parts[2]) if len(parts) > 2 and parts[2] != '*' else 1.0
-                    w50  = float(parts[3]) if len(parts) > 3 and parts[3] != '*' else 5.0
+                    s14  = float(parts[2]) if len(parts) > 2 and parts[2] not in ('*', '') else 1.0
+                    w50  = float(parts[3]) if len(parts) > 3 and parts[3] not in ('*', '') else 5.0
                     pulsars.append((p0, dm, s14, w50))
                 except (ValueError, IndexError):
                     continue
@@ -725,9 +872,13 @@ def load_gbncc(dest_dir: str = None, chunk_size: int = 8192,
     csv_path = os.path.join(dest_dir, 'gbncc_candidates.csv')
     os.makedirs(dest_dir, exist_ok=True)
     if not os.path.exists(csv_path) and auto_download:
-        _safe_download(
-            'https://www.chime-frb.ca/static/gbncc/gbncc_candidates_summary.csv',
-            csv_path, 'GBNCC', timeout=30)
+        for url in [
+            # GBNCC pulsar survey summary — try multiple mirrors
+            'https://www.naic.edu/~pfreire/GBNcatalogue.html',
+            'https://raw.githubusercontent.com/scottransom/presto/master/examples/gbncc.bestprof',
+        ]:
+            if _safe_download(url, csv_path, 'GBNCC', timeout=30):
+                break
     rng     = np.random.RandomState(77)
     t       = np.arange(chunk_size, dtype=np.float32)
     entries = []
@@ -783,38 +934,71 @@ def load_vlass(dest_dir: str = None, chunk_size: int = 8192,
                auto_download: bool = True) -> Tuple[np.ndarray, np.ndarray]:
     dest_dir = dest_dir or os.path.join(DATA_ROOT, 'vlass')
     csv_path = os.path.join(dest_dir, 'vlass_components.csv')
+    gz_path  = csv_path + '.gz'
     os.makedirs(dest_dir, exist_ok=True)
-    if not (os.path.exists(csv_path) and os.path.getsize(csv_path) > 0) and auto_download:
-        gz_path = csv_path + '.gz'
-        if _safe_download(
-                'https://cirada.ca/vlasscatalogueql0/VLASS1QL.component.catalog.v2.csv.gz',
-                gz_path, 'VLASS (compressed)', timeout=300):
+
+    # Delete corrupt cached files (HTML error pages are small and start with '<')
+    for bad in [gz_path, csv_path]:
+        if os.path.exists(bad) and os.path.getsize(bad) < 50000:
             try:
-                import gzip, shutil
-                with gzip.open(gz_path, 'rb') as fi, open(csv_path, 'wb') as fo:
-                    shutil.copyfileobj(fi, fo)
-                os.remove(gz_path)
-                logger.info(f'VLASS decompressed to {csv_path}')
-            except Exception as e:
-                logger.warning(f'VLASS decompress failed: {e}')
+                with open(bad, 'rb') as f:
+                    head = f.read(4)
+                if head.startswith(b'<'):
+                    os.remove(bad)
+                    logger.info(f'VLASS: removed corrupt cache {bad}')
+            except Exception:
+                pass
+
+    valid = os.path.exists(csv_path) and os.path.getsize(csv_path) > 50000
+
+    if not valid and auto_download:
+        # CADC TAP query — returns CSV of high-variability VLASS components directly
+        tap_url = (
+            'https://ws.cadc-ccda.hia-iha.nrc-cnrc.gc.ca/tap/sync'
+            '?REQUEST=doQuery&LANG=ADQL&FORMAT=csv&MAXREC=10000'
+            '&QUERY=SELECT+Peak_flux,Total_flux,Spectral_index,'
+            'Variability_index,RA,DEC+FROM+cirada.CIRADA_VLASS1QLv3p1_table1_components'
+            '+WHERE+Variability_index+%3E+0.3+ORDER+BY+Variability_index+DESC'
+        )
+        if _safe_download(tap_url, csv_path, 'VLASS via CADC TAP', timeout=120):
+            # Validate — reject if it's actually an HTML error
+            try:
+                with open(csv_path, 'rb') as f:
+                    head = f.read(4)
+                if head.startswith(b'<'):
+                    os.remove(csv_path)
+                    logger.warning('VLASS TAP returned HTML — trying without schema prefix')
+                    # Retry without schema qualifier
+                    tap_url2 = (
+                        'https://ws.cadc-ccda.hia-iha.nrc-cnrc.gc.ca/tap/sync'
+                        '?REQUEST=doQuery&LANG=ADQL&FORMAT=csv&MAXREC=10000'
+                        '&QUERY=SELECT+Peak_flux,Total_flux,Spectral_index,'
+                        'Variability_index+FROM+CIRADA_VLASS1QLv3p1_table1_components'
+                        '+WHERE+Variability_index+%3E+0.3'
+                    )
+                    _safe_download(tap_url2, csv_path, 'VLASS TAP (retry)', timeout=120)
+            except Exception:
+                pass
     rng        = np.random.RandomState(99)
     t          = np.arange(chunk_size, dtype=np.float32)
     transients = []
-    if os.path.exists(csv_path) and os.path.getsize(csv_path) > 0:
+    if os.path.exists(csv_path) and os.path.getsize(csv_path) > 1000:
         try:
             import csv as _csv
             with open(csv_path, newline='', encoding='utf-8', errors='replace') as f:
                 for row in _csv.DictReader(f):
                     try:
+                        # Handle both CADC TAP and original CIRADA column names
                         flux = float(row.get('Total_flux',
-                                     row.get('Peak_flux', 1.0)) or 1.0)
-                        var  = float(row.get('Variability_index', 0.0) or 0.0)
+                               row.get('total_flux',
+                               row.get('Peak_flux',
+                               row.get('peak_flux', 1.0)))) or 1.0)
+                        var  = float(row.get('Variability_index',
+                               row.get('variability_index', 0.0)) or 0.0)
+                        alpha = float(row.get('Spectral_index',
+                                row.get('spectral_index', -0.7)) or -0.7)
                         if abs(var) > 0.3 or abs(flux) > 10.0:
-                            transients.append((
-                                flux,
-                                float(row.get('Spectral_index', -0.7) or -0.7),
-                                var,
-                            ))
+                            transients.append((flux, alpha, var))
                     except Exception:
                         continue
                     if len(transients) >= 2000:

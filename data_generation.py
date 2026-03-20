@@ -99,26 +99,25 @@ def build_positive_pool(chunk_size: int, seed: Optional[int], htru2_dir: str = '
 
 def data_generator(chunk_size=8192, csv_data=None, debug=False, seed: Optional[int] = None,
                    batch_size=32, positive_ratio=0.5, as_numpy=True,
-                   htru2_dir: str = 'data/htru2', use_real_data: bool = True):
+                   htru2_dir: str = 'data/htru2', use_real_data: bool = True,
+                   _prebuilt_pool=None):
     """Deterministic, batch-aware infinite generator.
 
     Yields (X, y) where:
       X shape: (batch_size, chunk_size, 1)  float32
       y shape: (batch_size,)                float32  {0, 1}
-
-    Fixes vs original:
-    - Real HTRU2 data included in positive pool
-    - Negative class uses varied noise types including realistic RFI patterns
-    - Stable normalisation (clip ± 5σ)
-    - RNG is fully seeded for reproducibility
     """
     rng = np.random.RandomState(seed)
 
-    # Build pools once at generator creation
+    # Use pre-built pool if provided — skips load_all_datasets() entirely
     csv_pool = _build_csv_pool(csv_data, chunk_size)
-    wow_pool = build_positive_pool(chunk_size, seed=seed, htru2_dir=htru2_dir,
-                                    use_real_data=use_real_data)
-    logger.info(f'data_generator: positive pool size={len(wow_pool)}, csv_pool size={len(csv_pool)}')
+    if _prebuilt_pool is not None:
+        wow_pool = _prebuilt_pool
+        logger.info(f'data_generator: using pre-built pool ({len(wow_pool)} signals)')
+    else:
+        wow_pool = build_positive_pool(chunk_size, seed=seed, htru2_dir=htru2_dir,
+                                       use_real_data=use_real_data)
+        logger.info(f'data_generator: positive pool size={len(wow_pool)}, csv_pool size={len(csv_pool)}')
 
     pos_per_batch = max(1, int(batch_size * float(positive_ratio)))
 

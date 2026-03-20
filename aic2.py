@@ -701,26 +701,16 @@ def process_continuous_stream(sdr, model, output_dir):
         return None
     
     def validate_web_data(data):
-        """Recursively ensure all values are JSON-serializable."""
-        def _clean(v):
-            if isinstance(v, dict):
-                return {k: _clean(val) for k, val in v.items()}
-            if isinstance(v, (list, tuple)):
-                return [_clean(i) for i in v]
-            if isinstance(v, np.ndarray):
-                return v.tolist()
-            # handle cupy arrays when available
-            try:
-                if cp is not np and isinstance(v, cp.ndarray):
-                    return cp.asnumpy(v).tolist()
-            except Exception:
-                pass
-            if isinstance(v, np.generic):
-                return v.item()
-            if isinstance(v, (np.bool_,)):
-                return bool(v)
-            return v
-        return {k: _clean(val) for k, val in data.items()}
+        """Ensure all values are JSON-serializable"""
+        validated = {}
+        for key, value in data.items():
+            if isinstance(value, (np.ndarray, cp.ndarray)):
+                validated[key] = value.tolist()
+            elif isinstance(value, (np.generic)):
+                validated[key] = float(value)
+            else:
+                validated[key] = value
+        return validated
 
     old_settings = None
     # Terminal availability flags (guarded for non-interactive environments)
@@ -911,32 +901,33 @@ def process_continuous_stream(sdr, model, output_dir):
                     
                     # FFT processing with proper data conversion
                     try:
+                        # center_freq is the true tune point of the SDR.
+                        # process_fft adds it to fft_freq so the returned array
+                        # is already in absolute Hz — no manual offset needed.
+                        _center_freq = (freq_start + freq_stop) / 2.0
+
                         if USE_CUPY and getattr(cp, 'cuda', None) is not None and cp.cuda.runtime.getDeviceCount() > 0:
                             fft_magnitude, fft_freq, _, fft_phase, fft_power = process_fft(
-                                processed_samples_gpu,
-                                chunk_size,
-                                fs
+                                processed_samples_gpu, chunk_size, fs,
+                                center_freq=_center_freq
                             )
                             fft_magnitude = cp.asnumpy(fft_magnitude)
-                            fft_freq = cp.asnumpy(fft_freq)
-                            fft_power = cp.asnumpy(fft_power)
+                            fft_freq      = cp.asnumpy(fft_freq)
+                            fft_power     = cp.asnumpy(fft_power)
                         else:
                             fft_magnitude, fft_freq, _, fft_phase, fft_power = process_fft(
-                                processed_samples,
-                                chunk_size,
-                                fs
+                                processed_samples, chunk_size, fs,
+                                center_freq=_center_freq
                             )
-                        
-                        # fft_freq is in Hz; convert to MHz and offset by start frequency in MHz
-                        try:
-                            freq_mhz = (np.array(fft_freq) / 1e6) + (freq_start / 1e6)
-                        except Exception:
-                            freq_mhz = np.array([])
+
+                        # fft_freq is now absolute Hz — just convert to MHz
+                        freq_mhz = np.array(fft_freq) / 1e6
+
                         fft_data_dict = {
                             'magnitude': np.abs(fft_magnitude).tolist(),
                             'frequency': freq_mhz.tolist(),
-                            'power': np.abs(fft_power).tolist(),
-                            'phase': fft_phase.tolist() if isinstance(fft_phase, np.ndarray) else []
+                            'power':     np.abs(fft_power).tolist(),
+                            'phase':     fft_phase.tolist() if isinstance(fft_phase, np.ndarray) else []
                         }
                         logger.debug("FFT processed successfully")
                     except Exception as e:

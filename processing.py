@@ -253,18 +253,33 @@ def train_model(model, csv_data, htru2_dir: str = 'data/htru2',
 
     data_generator = _get_data_generator()
 
+    # Build the positive pool ONCE and share between train and val.
+    # Previously each generator called load_all_datasets() independently,
+    # causing downloads + full signal reconstruction twice per training run.
+    from data_generation import build_positive_pool, _build_csv_pool
+    logger.info('Building shared positive pool for train + val generators...')
+    shared_pool = build_positive_pool(
+        chunk_size=8192, seed=42,
+        htru2_dir=htru2_dir,
+        use_real_data=use_real_data,
+    )
+    logger.info(f'Shared pool ready: {len(shared_pool)} positive signals')
+
+    # Pass the pre-built pool as csv_data so generators skip load_all_datasets()
     base_train = data_generator(
-        chunk_size=8192, csv_data=csv_data,
+        chunk_size=8192, csv_data=None,
         batch_size=batch_size, positive_ratio=0.5,
-        htru2_dir=htru2_dir, use_real_data=use_real_data,
+        htru2_dir=htru2_dir, use_real_data=False,  # pool already built
         as_numpy=True,
+        _prebuilt_pool=shared_pool,
     )
     base_val = data_generator(
-        chunk_size=8192, csv_data=csv_data,
+        chunk_size=8192, csv_data=None,
         batch_size=batch_size, positive_ratio=0.5,
         seed=999,
-        htru2_dir=htru2_dir, use_real_data=use_real_data,
+        htru2_dir=htru2_dir, use_real_data=False,  # pool already built
         as_numpy=True,
+        _prebuilt_pool=shared_pool,
     )
 
     train_gen = _weighted_gen(base_train)

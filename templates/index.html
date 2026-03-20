@@ -466,6 +466,7 @@
       <div class="panel-header">
         <span class="panel-title">FFT Spectrum</span>
         <span class="panel-badge" id="fft-res-badge">—</span>
+        <span class="panel-badge" id="sat-badge" style="display:none;background:rgba(255,60,90,0.15);color:#ff3c5a;border-color:rgba(255,60,90,0.4)">SATURATED — lower gain</span>
       </div>
       <div class="panel-body" style="padding:12px 12px 8px">
         <canvas id="fft-chart" height="160"></canvas>
@@ -591,7 +592,7 @@ const fftChart = new Chart(fftCtx, {
   data: {
     labels: [],
     datasets: [{
-      label: 'Magnitude',
+      label: 'Power (dB)',
       data: [],
       borderColor: '#00d4ff',
       backgroundColor: 'rgba(0,212,255,0.07)',
@@ -615,12 +616,50 @@ const fftChart = new Chart(fftCtx, {
       y: {
         ticks: { color: '#4a6080', font: { family: 'Space Mono', size: 9 } },
         grid: { color: '#1e2d42' },
-        min: 0, max: 1,
-        title: { display: true, text: 'Norm. Magnitude', color: '#4a6080', font: { size: 10 } }
+        title: { display: true, text: 'dB', color: '#4a6080', font: { size: 10 } }
       }
     }
   }
 });
+
+function updateFFTChart(freqs, mags) {
+  if (!freqs || freqs.length === 0 || !mags || mags.length === 0) return;
+
+  // Detect saturation: all magnitudes nearly identical = flat spectrum = clipped ADC
+  const magArr = mags.map(Number).filter(v => isFinite(v));
+  const magMax = Math.max(...magArr);
+  const magMin = Math.min(...magArr);
+  const isSaturated = (magMax - magMin) < 0.01 && magMax > 0;
+  document.getElementById('sat-badge').style.display = isSaturated ? 'inline-block' : 'none';
+
+  // Convert magnitude to dB — adds dynamic range so peaks are visible
+  // Add small epsilon to avoid log(0)
+  const dbArr = magArr.map(v => 20 * Math.log10(Math.max(v, 1e-12)));
+
+  // Downsample to max 256 points for clean rendering
+  const TARGET = 256;
+  const stride = Math.max(1, Math.floor(freqs.length / TARGET));
+  const lbls = [], vals = [];
+  for (let i = 0; i < freqs.length; i += stride) {
+    const f = parseFloat(freqs[i]);
+    lbls.push(isFinite(f) ? f.toFixed(3) : '');
+    vals.push(isFinite(dbArr[i]) ? parseFloat(dbArr[i].toFixed(2)) : null);
+  }
+
+  // Dynamic Y axis: floor at (peak - 60dB), ceil at peak + 3dB
+  const validVals = vals.filter(v => v !== null);
+  if (validVals.length > 0) {
+    const yMax = Math.max(...validVals);
+    const yMin = yMax - 60;
+    fftChart.options.scales.y.min = Math.floor(yMin);
+    fftChart.options.scales.y.max = Math.ceil(yMax + 3);
+  }
+
+  fftChart.data.labels = lbls;
+  fftChart.data.datasets[0].data = vals;
+  fftChart.update('none');
+  document.getElementById('fft-res-badge').textContent = lbls.length + ' bins';
+}
 
 // ---------------------------------------------------------------------------
 // Confidence history chart
@@ -806,18 +845,13 @@ async function fetchSignal() {
     const fft = d.fft_data || {};
     const freqs = fft.frequency || [];
     const mags  = fft.magnitude || [];
-    if (freqs.length > 0 && mags.length > 0) {
-      // Downsample for performance if very large
-      const stride = Math.max(1, Math.floor(freqs.length / 512));
-      const lbls = [], vals = [];
-      for (let i = 0; i < freqs.length; i += stride) {
-        lbls.push(typeof freqs[i] === 'number' ? freqs[i].toFixed(3) : freqs[i]);
-        vals.push(mags[i]);
-      }
-      fftChart.data.labels = lbls;
-      fftChart.data.datasets[0].data = vals;
-      fftChart.update('none');
-      document.getElementById('fft-res-badge').textContent = lbls.length + ' bins';
+    updateFFTChart(freqs, mags);
+
+    // Update FFT panel to show actual configured frequency range
+    if (d.freq_start_mhz && d.freq_stop_mhz) {
+      const span = (d.freq_stop_mhz - d.freq_start_mhz).toFixed(3);
+      document.getElementById('fft-res-badge').title =
+        `${d.freq_start_mhz.toFixed(3)} – ${d.freq_stop_mhz.toFixed(3)} MHz | ${d.sample_rate_mhz} MHz BW`;
     }
 
     // Waterfall: take latest power row
