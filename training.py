@@ -408,20 +408,96 @@ def _pad_or_crop(arr: np.ndarray, chunk_size: int) -> np.ndarray:
 # Synthetic signal generators
 # ---------------------------------------------------------------------------
 
-def generate_wow_signals(chunk_size: int, n: int = 16, seed: Optional[int] = None,
+# ---------------------------------------------------------------------------
+# Synthetic signal generators
+# ---------------------------------------------------------------------------
+
+def generate_wow_signals(chunk_size: int, n: int = 200, seed: Optional[int] = None,
                          as_numpy: bool = True) -> List[np.ndarray]:
+    """Narrowband drifting tone — realistic drift rates and Doppler shifts.
+
+    Drift rates based on real SETI/radio observations:
+      Earth rotation at 1420 MHz: ~1.5 Hz/s
+      Realistic range: 0.1 to 15 Hz/s
+
+    Doppler shifts from source velocity:
+      ±600 km/s covers galactic + extragalactic sources
+    """
     rng = _seed_rng(seed)
     out = []
     t = np.arange(chunk_size, dtype=np.float32)
+    HI_REST_NORM = 0.01005   # 1420.405 MHz normalised in 20 MHz BW
+
     for _ in range(n):
-        center   = rng.uniform(0.005, 0.02)
-        drift    = rng.uniform(-0.001, 0.001)
-        amp      = rng.uniform(0.5, 3.0)
-        width    = rng.uniform(0.05, 0.15) * chunk_size
-        envelope = np.exp(-((t - chunk_size / 2) ** 2) / (width ** 2))
-        freq     = center + drift * (t - chunk_size / 2) / float(chunk_size)
-        sig      = amp * envelope * np.exp(2j * np.pi * freq * t)
-        out.append(np.real(sig).astype(np.float32) if as_numpy else sig)
+        # Doppler shift from source velocity
+        velocity     = rng.uniform(-600, 600)  # km/s
+        doppler      = velocity / 3e5 * HI_REST_NORM
+        center       = np.clip(HI_REST_NORM + doppler + rng.uniform(-0.002, 0.002),
+                               0.002, 0.045)
+
+        # Realistic drift rate (Hz/s normalised to chunk)
+        drift_hz_s   = rng.choice([-1, 1]) * rng.uniform(0.1, 15.0)
+        drift_norm   = drift_hz_s / 20e6 * chunk_size
+
+        amp          = rng.uniform(0.3, 3.0)
+        width        = rng.uniform(0.04, 0.20) * chunk_size
+        envelope     = np.exp(-((t - chunk_size / 2) ** 2) / (width ** 2))
+        freq_inst    = center + drift_norm * (t - chunk_size / 2) / float(chunk_size)
+        sig          = amp * envelope * np.exp(2j * np.pi * freq_inst * t)
+        sig_real     = np.real(sig).astype(np.float32)
+        sig_real    += rng.normal(0, rng.uniform(0.05, 0.4), chunk_size).astype(np.float32)
+        out.append(sig_real if as_numpy else sig)
+    return out
+
+
+def generate_doppler_shifted_hi(chunk_size: int, n: int = 100, seed: Optional[int] = None,
+                                 as_numpy: bool = True) -> List[np.ndarray]:
+    """HI 21-cm emission with realistic Doppler shifts and optional drift.
+
+    Covers the full galactic HI velocity range:
+      Local ISM:          ±50 km/s
+      Galactic rotation:  ±200 km/s
+      High-velocity clouds: ±400 km/s
+      Extragalactic:      up to ±600 km/s
+
+    Some signals have multiple velocity components (common in real HI spectra).
+    30% of signals include linear drift (rotating/accelerating sources).
+    """
+    rng = _seed_rng(seed)
+    out = []
+    t = np.arange(chunk_size, dtype=np.float32)
+    HI_REST_NORM = 0.01005
+
+    for _ in range(n):
+        n_comp = rng.choice([1, 2, 3], p=[0.6, 0.3, 0.1])
+        sig    = np.zeros(chunk_size, dtype=np.float32)
+
+        for _ in range(n_comp):
+            vel_type = rng.choice(['local', 'rotation', 'hvc', 'extragalactic'],
+                                   p=[0.4, 0.35, 0.15, 0.1])
+            if vel_type == 'local':
+                vel = rng.uniform(-50, 50)
+            elif vel_type == 'rotation':
+                vel = rng.uniform(-200, 200)
+            elif vel_type == 'hvc':
+                vel = rng.choice([-1, 1]) * rng.uniform(90, 400)
+            else:
+                vel = rng.choice([-1, 1]) * rng.uniform(200, 600)
+
+            freq_c    = HI_REST_NORM + vel / 3e5 * HI_REST_NORM
+            linewidth = rng.uniform(0.00005, 0.0008)
+            amp       = rng.uniform(0.05, 1.0)
+
+            if rng.rand() < 0.3:
+                drift_norm = rng.uniform(0.05, 5.0) * rng.choice([-1, 1]) / 20e6 * chunk_size
+                freq_inst  = freq_c + drift_norm * (t - chunk_size / 2) / float(chunk_size)
+            else:
+                freq_inst = freq_c + linewidth * rng.randn()
+
+            sig += amp * np.sin(2 * np.pi * freq_inst * t).astype(np.float32)
+
+        sig += rng.normal(0, rng.uniform(0.1, 0.4), chunk_size).astype(np.float32)
+        out.append(sig)
     return out
 
 
@@ -1171,6 +1247,7 @@ def load_training_data_from_folder(path: str, chunk_size: int,
 __all__ = [
     'generate_wow_signals', 'generate_pulsar_signals',
     'generate_frb_signals', 'generate_hydrogen_line',
+    'generate_doppler_shifted_hi',
     'load_training_data_from_folder',
     'download_all_datasets',
     'download_htru2', 'load_htru2', 'load_htru_south',

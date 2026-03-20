@@ -25,6 +25,7 @@ from training import (
     generate_pulsar_signals,
     generate_frb_signals,
     generate_hydrogen_line,
+    generate_doppler_shifted_hi,
     load_training_data_from_folder,
     load_all_datasets,
 )
@@ -60,7 +61,8 @@ def build_positive_pool(chunk_size: int, seed: Optional[int], htru2_dir: str = '
 
     # 1. Synthetic generators
     for gen_fn in (generate_wow_signals, generate_pulsar_signals,
-                   generate_frb_signals, generate_hydrogen_line):
+                   generate_frb_signals, generate_hydrogen_line,
+                   generate_doppler_shifted_hi):
         try:
             lst = gen_fn(chunk_size, seed=seed, as_numpy=True)
             for s in lst:
