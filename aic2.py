@@ -1,4 +1,3 @@
-from asyncio import sleep
 import logging
 import sys
 import os
@@ -9,10 +8,77 @@ if _proj_root not in sys.path:
     sys.path.insert(0, _proj_root)
 import time
 import numpy as np
-from scipy.signal import lfilter, butter
 from astropy.io import fits
 import argparse
 import os
+import signal
+
+# =========================
+# Graceful shutdown handler
+# =========================
+SHUTDOWN_REQUESTED = False
+_shutdown_event = __import__('threading').Event()
+
+
+def _handle_exit(sig, frame):
+    global SHUTDOWN_REQUESTED
+    print(f"\nShutdown requested (signal {sig})")
+    SHUTDOWN_REQUESTED = True
+    _shutdown_event.set()
+
+
+signal.signal(signal.SIGINT,  _handle_exit)
+signal.signal(signal.SIGTERM, _handle_exit)
+try:
+    signal.signal(signal.SIGABRT, _handle_exit)
+except Exception:
+    pass
+
+
+def _clean_shutdown(sdr=None, model=None):
+    """Teardown: SDR -> TF session -> logs -> os._exit(0).
+
+    os._exit bypasses __del__ and atexit handlers that call back into
+    libhackrf/libusb/TF GPU — those are the segfault root cause.
+    """
+    _log = logging.getLogger('aic')
+    _log.info('Clean shutdown initiated')
+
+    # 1. Stop SDR — only if not already closed by process_continuous_stream
+    if sdr is not None and not getattr(sdr, '_already_closed', False):
+        try:
+            if hasattr(sdr, 'stop_rx'):
+                sdr.stop_rx()
+        except Exception:
+            pass
+        try:
+            if hasattr(sdr, 'close'):
+                sdr.close()
+        except Exception:
+            pass
+        # Give libhackrf 300ms to release USB handles before os._exit fires
+        import time as _t; _t.sleep(0.3)
+    else:
+        _log.debug('SDR already closed — skipping teardown')
+
+    # 2. Release TensorFlow GPU memory
+    if model is not None:
+        try:
+            import tensorflow as _tf
+            _tf.keras.backend.clear_session()
+            _log.debug('TF session cleared')
+        except Exception:
+            pass
+
+    # 3. Flush all log handlers
+    try:
+        logging.shutdown()
+    except Exception:
+        pass
+
+    # 4. Hard exit — skips all __del__ / atexit that cause segfault
+    os._exit(0)
+
 try:
     from pyhackrf2 import HackRF
     # HackRF import succeeded
@@ -27,6 +93,19 @@ import subprocess
 os.environ.setdefault('TF_XLA_FLAGS', '--tf_xla_enable_xla_devices=false')
 os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '2')
 import tensorflow as tf
+# Force Keras mixed-precision policy to float32 to avoid float16 ops on GPU
+try:
+    try:
+        from tensorflow.keras import mixed_precision
+        mixed_precision.set_global_policy('float32')
+    except Exception:
+        # Fallback to tf.keras API if available
+        try:
+            tf.keras.mixed_precision.set_global_policy('float32')
+        except Exception:
+            pass
+except Exception:
+    pass
 import socket
 import json
 try:
@@ -61,6 +140,9 @@ if not logger.handlers:
     logger.addHandler(ch)
     logger.debug('Console logging handler attached')
 logger.debug('aic2 module imported and logger configured')
+
+
+
 
 # Import common constants from legacy module when available, otherwise use safe defaults
 try:
@@ -173,6 +255,25 @@ except Exception:
 from threading import Lock
 latest_data = {}
 data_lock = Lock()
+
+
+def _preflight_download():
+    """Download all training datasets before model.fit() is called.
+
+    This ensures download progress appears in the log instead of happening
+    silently inside the generator. Safe to call multiple times — cached files
+    are skipped immediately.
+    """
+    try:
+        from training import download_all_datasets
+        data_root = os.getenv('DATA_DIR', 'data')
+        logger.info('Starting dataset pre-flight download ...')
+        results = download_all_datasets(data_root=data_root)
+        ok  = sum(1 for v in results.values() if v)
+        tot = len(results)
+        logger.info(f'Pre-flight complete: {ok}/{tot} datasets with real data')
+    except Exception as e:
+        logger.warning(f'Pre-flight download failed ({e}) — training will use synthetic data')
 
 # Import lower-level signal utilities from advance_signal_processing when available
 try:
@@ -345,6 +446,11 @@ def predict_signal(model, samples):
             logger.warning("Near-zero standard deviation in input signal (after prep)")
             return (False, 0.0)
 
+        # Ensure input is float32 to avoid mixed-precision float16 execution
+        try:
+            input_tensor = tf.cast(input_tensor, tf.float32)
+        except Exception:
+            pass
         confidence = model(input_tensor, training=False)
 
         # Log raw model output (safe conversion for tf.Tensor or numpy)
@@ -595,16 +701,26 @@ def process_continuous_stream(sdr, model, output_dir):
         return None
     
     def validate_web_data(data):
-        """Ensure all values are JSON-serializable"""
-        validated = {}
-        for key, value in data.items():
-            if isinstance(value, (np.ndarray, cp.ndarray)):
-                validated[key] = value.tolist()
-            elif isinstance(value, (np.generic)):
-                validated[key] = float(value)
-            else:
-                validated[key] = value
-        return validated
+        """Recursively ensure all values are JSON-serializable."""
+        def _clean(v):
+            if isinstance(v, dict):
+                return {k: _clean(val) for k, val in v.items()}
+            if isinstance(v, (list, tuple)):
+                return [_clean(i) for i in v]
+            if isinstance(v, np.ndarray):
+                return v.tolist()
+            # handle cupy arrays when available
+            try:
+                if cp is not np and isinstance(v, cp.ndarray):
+                    return cp.asnumpy(v).tolist()
+            except Exception:
+                pass
+            if isinstance(v, np.generic):
+                return v.item()
+            if isinstance(v, (np.bool_,)):
+                return bool(v)
+            return v
+        return {k: _clean(val) for k, val in data.items()}
 
     old_settings = None
     # Terminal availability flags (guarded for non-interactive environments)
@@ -644,9 +760,12 @@ def process_continuous_stream(sdr, model, output_dir):
         test_signal = np.random.normal(0, 0.5, chunk_size)
         test_detection, test_confidence = predict_signal(model, test_signal)
         logger.info(f"✅ Model test - Confidence: {test_confidence:.4f} (should be > 0)")
-
+        global SHUTDOWN_REQUESTED   
         while True:
             try:
+                if SHUTDOWN_REQUESTED:
+                    logger.info("Shutdown flag set — exiting processing loop")
+                    break
                 # Check for key presses
                 key = is_key_pressed()
                 if key == 'w':
@@ -659,6 +778,8 @@ def process_continuous_stream(sdr, model, output_dir):
                     logger.info(f"Debug test - Confidence: {debug_confidence:.4f}")
                 elif key == 'q':
                     logger.info("🛑 Quit key detected. Shutting down gracefully...")
+                    
+                    SHUTDOWN_REQUESTED = True
                     break
                     
                 # Read from SDR
@@ -1015,6 +1136,11 @@ def process_continuous_stream(sdr, model, output_dir):
             sdr.close()
         except Exception:
             pass
+        # Nullify so _clean_shutdown knows not to close it again
+        try:
+            sdr._already_closed = True
+        except Exception:
+            pass
         logger.info("✅ Processing stopped and SDR closed")
 
 def save_fits(processed_samples, output_dir, timestamp):
@@ -1069,10 +1195,16 @@ def main():
         except RuntimeError as e:
             logger.error(f"Could not set GPU memory growth: {e}")
         try:
-            tf.keras.mixed_precision.set_global_policy('mixed_float16')
-            logger.info("Enabled mixed_float16 policy for GPU")
+            # Allow opt-in to mixed precision via environment variable; default to float32
+            mp_enabled = str(os.getenv('ENABLE_MIXED_PRECISION', '')).strip().lower() in ('1', 'true', 'yes')
+            if mp_enabled:
+                tf.keras.mixed_precision.set_global_policy('mixed_float16')
+                logger.info("Enabled mixed_float16 policy for GPU (opt-in via ENABLE_MIXED_PRECISION=1)")
+            else:
+                tf.keras.mixed_precision.set_global_policy('float32')
+                logger.info("Using float32 policy for Keras (mixed precision disabled)")
         except Exception as e:
-            logger.warning(f"Could not enable mixed precision: {e}")
+            logger.warning(f"Could not set mixed precision policy: {e}")
     else:
         logger.warning("No GPU found, falling back to CPU")
 
@@ -1135,7 +1267,6 @@ def main():
 
     model_dir = os.path.join('models', 'full_state')
     model_path = os.path.join(model_dir, 'full_model.keras')
-    bn_path = os.path.join(model_dir, 'bn_states.json')
 
     model = None
     logger.debug('Beginning model load/train decision')
@@ -1151,6 +1282,7 @@ def main():
             if args.train or args.force_train:
                 logger.info("Will train new model due to load failure")
                 model = create_model()
+                _preflight_download()
                 train_model(model, args.path)
             else:
                 logger.error("No model available and training not requested, exiting")
@@ -1159,6 +1291,7 @@ def main():
     else:
         logger.info("Training new model from scratch...")
         model = create_model()
+        _preflight_download()
         train_model(model, args.path)
 
     # Final quick test prediction after training/loading
@@ -1193,23 +1326,6 @@ def main():
     except Exception as e:
         logger.error(f"Model dummy prediction failed: {e}")
         sys.exit(1)
-    # Start background detection job consumer to serialize detection IO/plotting
-    try:
-        logger.debug('Starting detection job consumer')
-        # capture returned forwarder thread and mp process so we can shut them down
-        try:
-            forwarder_thread, mp_process = start_detection_job_consumer()
-        except Exception:
-            # Some implementations may return None or not return both handles
-            res = start_detection_job_consumer()
-            if isinstance(res, tuple) and len(res) >= 2:
-                forwarder_thread, mp_process = res[0], res[1]
-            else:
-                forwarder_thread = None
-                mp_process = None
-        logger.debug('Detection job consumer started (or attempted)')
-    except Exception as e:
-        logger.warning(f"Could not start detection job consumer: {e}")
     # Disable startup tests by default to avoid child-process environment issues
     # (can be re-enabled by explicitly setting DISABLE_ALWAYS_RUN=0 in env)
     os.environ.setdefault('DISABLE_ALWAYS_RUN', '1')
@@ -1258,50 +1374,41 @@ def main():
     except Exception as e:
         logger.error(f"SDR processing failed: {e}")
     finally:
-        if 'sdr' in locals():
-            sdr.close()
-            logger.info("HackRF device closed")
-        # Signal detection forwarder/worker to stop gracefully
-        try:
-            if DETECTION_JOB_QUEUE is not None:
-                try:
-                    DETECTION_JOB_QUEUE.put(None)
-                    logger.debug('Signalled detection forwarder to shutdown')
-                except Exception:
-                    logger.exception('Failed to put shutdown sentinel into DETECTION_JOB_QUEUE')
-        except Exception:
-            pass
-
-        try:
-            if 'forwarder_thread' in locals() and forwarder_thread is not None:
-                forwarder_thread.join(timeout=5)
-                logger.debug('Forwarder thread join attempted')
-        except Exception:
-            logger.exception('Error while joining forwarder thread')
-
-        try:
-            if 'mp_process' in locals() and mp_process is not None:
-                mp_process.join(timeout=5)
-                logger.debug('MP worker process join attempted')
-        except Exception:
-            logger.exception('Error while joining mp worker process')
+        _clean_shutdown(
+            sdr=sdr if 'sdr' in locals() else None,
+            model=model if 'model' in locals() else None,
+        )
             
 if __name__ == "__main__":
     from threading import Thread
-    # Import the web module (do not import aic here to avoid circular imports)
     import web
 
-    # Bind the Flask app and its shared state to this runtime's copies so that
-    # the web UI observes updates performed inside this process.
     app = web.app
     web.latest_data = latest_data
     web.data_lock = data_lock
 
-    logger.debug('__main__ entry: starting processing thread')
-    processing_thread = Thread(target=main)
+    # Daemon=True: processing thread dies automatically when main thread exits
+    # — no more zombie process in htop after quit
+    processing_thread = Thread(target=main, daemon=True, name='aic-processing')
     processing_thread.start()
-    logger.debug('Processing thread started; launching web app')
+
+    # Watch for shutdown event set by 'q' key or SIGINT — stops Flask cleanly
+    def _watch_for_shutdown():
+        _shutdown_event.wait()
+        logger.info('Shutdown event fired — stopping Flask and exiting')
+        # Give the processing loop 1s to finish its current chunk
+        import time
+        time.sleep(1.0)
+        _clean_shutdown()
+
+    Thread(target=_watch_for_shutdown, daemon=True, name='shutdown-watcher').start()
+
+    logger.info('Starting web server on http://0.0.0.0:5001')
     try:
-        app.run(host='0.0.0.0', port=5001)
+        app.run(host='0.0.0.0', port=5001, debug=False, use_reloader=False)
     except Exception as e:
-        logger.error(f'Web app failed to start: {e}', exc_info=True)
+        logger.error(f'Web app error: {e}', exc_info=True)
+    finally:
+        SHUTDOWN_REQUESTED = True
+        _shutdown_event.set()
+        _clean_shutdown()

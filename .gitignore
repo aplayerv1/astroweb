@@ -1,8 +1,77 @@
-*.pyc
-output/*
-venv/*
-.env
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environment
+env/
+venv/
+.venv/
+ENV/
+
+# Logs
+logs/
 *.log
-models/*
-raw/*
-data/*
+
+# Model files (large binaries — store separately or use Git LFS)
+models/
+*.keras
+*.h5
+*.pkl
+*.pt
+*.pth
+
+# Training data (large datasets — never commit)
+data/
+
+# SDR output / detections / plots
+output/
+
+# FITS files
+*.fits
+*.fit
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Secrets / credentials
+.env
+*.env
+secrets.py
+config_local.py
+
+# TensorFlow / training artefacts
+events.out.tfevents.*
+checkpoint
+saved_model/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.bak
+
+# Coverage / testing
+.coverage
+htmlcov/
+.pytest_cache/
