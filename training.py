@@ -166,13 +166,7 @@ def download_all_datasets(data_root: str = None) -> dict:
     logger.info('\n[2/9] ATNF — all known pulsars (CSIRO PSRCAT)')
     atnf_csv = os.path.join(root, 'atnf', 'atnf_pulsars.csv')
     atnf_url = (
-        'https://www.atnf.csiro.au/people/pulsar/psrcat/proc_form.php'
-        '?Type=expert&mainsel=&state=query&table_bottom.x=28&table_bottom.y=12'
-        '&Params=P0+DM+S1400+W50&startUserDefined=true&c1_val=&c2_val='
-        '&c3_val=&c4_val=&sort_attr=jname&sort_order=asc&condition='
-        '&pulsar_names=&ephemeris=expert&submit_ephemeris=Get+Ephemeris'
-        '&coords_unit=raj%2Fdecj&radius=&coords_1=&coords_2='
-        '&style=short&no_value=*&fsize=3&x_axis=&x_data=&y_axis=&y_data='
+        'https://other.mvia.ca/pulsar_stars.csv.zip'
     )
     results['atnf'] = _safe_download(atnf_url, atnf_csv, 'ATNF PSRCAT', timeout=60)
     if not results['atnf']:
@@ -338,11 +332,7 @@ def download_all_datasets(data_root: str = None) -> dict:
         # CADC TAP query — returns CSV of high-variability VLASS components
         # Limited to 10000 rows to keep download fast
         tap_url = (
-            'https://ws.cadc-ccda.hia-iha.nrc-cnrc.gc.ca/tap/sync'
-            '?REQUEST=doQuery&LANG=ADQL&FORMAT=csv&MAXREC=10000'
-            '&QUERY=SELECT+Peak_flux,Total_flux,Spectral_index,'
-            'Variability_index,RA,DEC+FROM+cirada.CIRADA_VLASS1QLv3p1_table1_components'
-            '+WHERE+Variability_index+%3E+0.3+ORDER+BY+Variability_index+DESC'
+            'http://other.mvia.ca/telescope_data.csv.zip'
         )
         vlass_ok = _safe_download(tap_url, vlass_csv, 'VLASS via CADC TAP', timeout=120)
 
@@ -413,39 +403,62 @@ def _pad_or_crop(arr: np.ndarray, chunk_size: int) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 def generate_wow_signals(chunk_size: int, n: int = 200, seed: Optional[int] = None,
-                         as_numpy: bool = True) -> List[np.ndarray]:
-    """Narrowband drifting tone — realistic drift rates and Doppler shifts.
+                         as_numpy: bool = True,
+                         sample_rate_hz: float = 2e6) -> List[np.ndarray]:
+    """Narrowband drifting tone with realistic beam transit envelope.
+
+    Improvements over the original Gaussian envelope:
+      - Uses an actual antenna beam transit profile (Gaussian beam response
+        as a point source drifts through at the sidereal rate).
+      - 50% of signals use beam transit; 50% use a generic Gaussian to
+        keep diversity for sources not transiting at the sidereal rate.
+      - Beam FWHM drawn from realistic range (3-15°) to simulate different
+        antenna sizes and off-axis transits.
 
     Drift rates based on real SETI/radio observations:
       Earth rotation at 1420 MHz: ~1.5 Hz/s
       Realistic range: 0.1 to 15 Hz/s
-
-    Doppler shifts from source velocity:
-      ±600 km/s covers galactic + extragalactic sources
     """
+    try:
+        from coordinates import beam_transit_profile
+        _HAS_COORDS = True
+    except ImportError:
+        _HAS_COORDS = False
+
     rng = _seed_rng(seed)
     out = []
     t = np.arange(chunk_size, dtype=np.float32)
     HI_REST_NORM = 0.01005   # 1420.405 MHz normalised in 20 MHz BW
 
     for _ in range(n):
-        # Doppler shift from source velocity
         velocity     = rng.uniform(-600, 600)  # km/s
         doppler      = velocity / 3e5 * HI_REST_NORM
         center       = np.clip(HI_REST_NORM + doppler + rng.uniform(-0.002, 0.002),
                                0.002, 0.045)
-
-        # Realistic drift rate (Hz/s normalised to chunk)
         drift_hz_s   = rng.choice([-1, 1]) * rng.uniform(0.1, 15.0)
         drift_norm   = drift_hz_s / 20e6 * chunk_size
-
         amp          = rng.uniform(0.3, 3.0)
-        width        = rng.uniform(0.04, 0.20) * chunk_size
-        envelope     = np.exp(-((t - chunk_size / 2) ** 2) / (width ** 2))
-        freq_inst    = center + drift_norm * (t - chunk_size / 2) / float(chunk_size)
-        sig          = amp * envelope * np.exp(2j * np.pi * freq_inst * t)
-        sig_real     = np.real(sig).astype(np.float32)
-        sig_real    += rng.normal(0, rng.uniform(0.05, 0.4), chunk_size).astype(np.float32)
+
+        # Envelope: 50% beam transit, 50% generic Gaussian
+        use_beam = _HAS_COORDS and rng.rand() < 0.5
+        if use_beam:
+            fwhm_deg   = rng.uniform(3.0, 15.0)
+            # Declination factor reduces sidereal rate for off-equatorial sources
+            dec_factor = np.cos(np.radians(rng.uniform(-60, 60)))
+            envelope   = beam_transit_profile(
+                chunk_size,
+                beam_fwhm_deg=fwhm_deg,
+                sidereal_rate_deg_per_s=0.00417807 * dec_factor,
+                sample_rate_hz=sample_rate_hz,
+            )
+        else:
+            width    = rng.uniform(0.04, 0.20) * chunk_size
+            envelope = np.exp(-((t - chunk_size / 2) ** 2) / (width ** 2))
+
+        freq_inst = center + drift_norm * (t - chunk_size / 2) / float(chunk_size)
+        sig       = amp * envelope * np.exp(2j * np.pi * freq_inst * t)
+        sig_real  = np.real(sig).astype(np.float32)
+        sig_real += rng.normal(0, rng.uniform(0.05, 0.4), chunk_size).astype(np.float32)
         out.append(sig_real if as_numpy else sig)
     return out
 

@@ -1,925 +1,216 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AIC — Astronomical Signal Monitor</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
-<style>
-  @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Inter:wght@300;400;500;600&display=swap');
-
-  :root {
-    --bg:        #080c14;
-    --bg2:       #0d1420;
-    --bg3:       #111a28;
-    --border:    #1e2d42;
-    --accent:    #00d4ff;
-    --accent2:   #0077ff;
-    --green:     #00ff88;
-    --yellow:    #ffd600;
-    --red:       #ff3c5a;
-    --text:      #e0eaff;
-    --muted:     #4a6080;
-    --font-mono: 'Space Mono', monospace;
-    --font-ui:   'Inter', sans-serif;
-    --radius:    8px;
-  }
-
-  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
-  body {
-    background: var(--bg);
-    color: var(--text);
-    font-family: var(--font-ui);
-    font-size: 14px;
-    min-height: 100vh;
-    overflow-x: hidden;
-  }
-
-  /* Starfield background */
-  body::before {
-    content: '';
-    position: fixed;
-    inset: 0;
-    background-image:
-      radial-gradient(1px 1px at 10% 20%, rgba(0,212,255,0.4) 0%, transparent 100%),
-      radial-gradient(1px 1px at 30% 60%, rgba(255,255,255,0.3) 0%, transparent 100%),
-      radial-gradient(1px 1px at 50% 10%, rgba(0,119,255,0.3) 0%, transparent 100%),
-      radial-gradient(1px 1px at 70% 80%, rgba(255,255,255,0.2) 0%, transparent 100%),
-      radial-gradient(1px 1px at 90% 40%, rgba(0,212,255,0.3) 0%, transparent 100%),
-      radial-gradient(1px 1px at 20% 90%, rgba(255,255,255,0.2) 0%, transparent 100%),
-      radial-gradient(1px 1px at 80% 15%, rgba(0,255,136,0.2) 0%, transparent 100%);
-    pointer-events: none;
-    z-index: 0;
-  }
-
-  /* Scan line animation */
-  body::after {
-    content: '';
-    position: fixed;
-    top: -100%;
-    left: 0;
-    right: 0;
-    height: 2px;
-    background: linear-gradient(90deg, transparent, var(--accent), transparent);
-    animation: scan 8s linear infinite;
-    opacity: 0.15;
-    pointer-events: none;
-    z-index: 1;
-  }
-
-  @keyframes scan { to { top: 110%; } }
-
-  /* Layout */
-  .shell {
-    position: relative;
-    z-index: 2;
-    max-width: 1400px;
-    margin: 0 auto;
-    padding: 0 20px 40px;
-  }
-
-  /* Header */
-  header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 20px 0 24px;
-    border-bottom: 1px solid var(--border);
-    margin-bottom: 24px;
-  }
-
-  .logo {
-    display: flex;
-    align-items: center;
-    gap: 14px;
-  }
-
-  .logo-icon {
-    width: 40px; height: 40px;
-    border-radius: 50%;
-    background: conic-gradient(var(--accent) 0deg, var(--accent2) 120deg, var(--green) 240deg, var(--accent) 360deg);
-    animation: spin 12s linear infinite;
-    flex-shrink: 0;
-  }
-
-  @keyframes spin { to { transform: rotate(360deg); } }
-
-  .logo-text h1 {
-    font-family: var(--font-mono);
-    font-size: 18px;
-    letter-spacing: 3px;
-    color: var(--accent);
-    text-transform: uppercase;
-  }
-
-  .logo-text p {
-    font-size: 11px;
-    color: var(--muted);
-    letter-spacing: 1px;
-    margin-top: 2px;
-  }
-
-  .header-right {
-    display: flex;
-    align-items: center;
-    gap: 20px;
-  }
-
-  #connection-badge {
-    display: flex;
-    align-items: center;
-    gap: 7px;
-    font-family: var(--font-mono);
-    font-size: 11px;
-    letter-spacing: 1px;
-    color: var(--muted);
-  }
-
-  .dot {
-    width: 8px; height: 8px;
-    border-radius: 50%;
-    background: var(--muted);
-    transition: background 0.4s;
-  }
-
-  .dot.live { background: var(--green); box-shadow: 0 0 8px var(--green); animation: pulse-dot 2s ease-in-out infinite; }
-  .dot.error { background: var(--red); }
-
-  @keyframes pulse-dot {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.4; }
-  }
-
-  #utc-clock {
-    font-family: var(--font-mono);
-    font-size: 13px;
-    color: var(--muted);
-    letter-spacing: 1px;
-  }
-
-  /* Detection banner */
-  #detection-banner {
-    display: none;
-    align-items: center;
-    justify-content: center;
-    gap: 12px;
-    padding: 12px 20px;
-    background: linear-gradient(90deg, rgba(0,255,136,0.08), rgba(0,255,136,0.15), rgba(0,255,136,0.08));
-    border: 1px solid var(--green);
-    border-radius: var(--radius);
-    margin-bottom: 20px;
-    font-family: var(--font-mono);
-    font-size: 13px;
-    color: var(--green);
-    letter-spacing: 2px;
-    text-transform: uppercase;
-    animation: flash-border 0.8s ease-in-out infinite alternate;
-  }
-
-  @keyframes flash-border {
-    from { border-color: rgba(0,255,136,0.4); }
-    to   { border-color: var(--green); }
-  }
-
-  #detection-banner.show { display: flex; }
-
-  .banner-icon { font-size: 20px; }
-
-  /* Metric cards row */
-  .metrics-row {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-    gap: 12px;
-    margin-bottom: 20px;
-  }
-
-  .metric-card {
-    background: var(--bg2);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 16px 18px;
-    position: relative;
-    overflow: hidden;
-    transition: border-color 0.3s;
-  }
-
-  .metric-card::before {
-    content: '';
-    position: absolute;
-    top: 0; left: 0; right: 0;
-    height: 2px;
-    background: var(--accent);
-    opacity: 0.3;
-  }
-
-  .metric-card.highlight::before { opacity: 1; background: var(--green); }
-
-  .metric-label {
-    font-size: 10px;
-    letter-spacing: 1.5px;
-    text-transform: uppercase;
-    color: var(--muted);
-    margin-bottom: 8px;
-    font-family: var(--font-mono);
-  }
-
-  .metric-value {
-    font-family: var(--font-mono);
-    font-size: 22px;
-    font-weight: 700;
-    color: var(--text);
-    transition: color 0.3s;
-  }
-
-  .metric-value.up   { color: var(--green); }
-  .metric-value.warn { color: var(--yellow); }
-  .metric-value.down { color: var(--red); }
-
-  .metric-sub {
-    font-size: 11px;
-    color: var(--muted);
-    margin-top: 4px;
-  }
-
-  /* Charts grid */
-  .charts-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 16px;
-    margin-bottom: 16px;
-  }
-
-  .charts-grid.wide { grid-template-columns: 1fr; }
-
-  @media (max-width: 900px) {
-    .charts-grid { grid-template-columns: 1fr; }
-  }
-
-  .panel {
-    background: var(--bg2);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    overflow: hidden;
-  }
-
-  .panel-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 12px 16px;
-    border-bottom: 1px solid var(--border);
-    background: var(--bg3);
-  }
-
-  .panel-title {
-    font-family: var(--font-mono);
-    font-size: 11px;
-    letter-spacing: 2px;
-    text-transform: uppercase;
-    color: var(--accent);
-  }
-
-  .panel-badge {
-    font-family: var(--font-mono);
-    font-size: 10px;
-    padding: 2px 8px;
-    border-radius: 4px;
-    background: rgba(0,212,255,0.1);
-    color: var(--accent);
-    border: 1px solid rgba(0,212,255,0.2);
-  }
-
-  .panel-body {
-    padding: 16px;
-  }
-
-  canvas { width: 100% !important; }
-
-  /* Waterfall */
-  #waterfall-canvas {
-    width: 100%;
-    height: 180px;
-    display: block;
-    image-rendering: pixelated;
-  }
-
-  /* Bottom row */
-  .bottom-row {
-    display: grid;
-    grid-template-columns: 1fr 300px;
-    gap: 16px;
-  }
-
-  @media (max-width: 900px) { .bottom-row { grid-template-columns: 1fr; } }
-
-  /* Confidence gauge */
-  #conf-gauge-wrap {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    padding: 20px;
-  }
-
-  .gauge-svg { width: 180px; height: 100px; overflow: visible; }
-
-  #gauge-text {
-    font-family: var(--font-mono);
-    font-size: 28px;
-    font-weight: 700;
-    fill: var(--text);
-  }
-
-  #gauge-label {
-    font-size: 10px;
-    fill: var(--muted);
-    letter-spacing: 2px;
-  }
-
-  #gauge-arc { transition: stroke-dashoffset 0.5s ease, stroke 0.5s ease; }
-
-  /* Log terminal */
-  #log-terminal {
-    background: #040810;
-    border-radius: 4px;
-    padding: 12px;
-    height: 220px;
-    overflow-y: auto;
-    font-family: var(--font-mono);
-    font-size: 11px;
-    line-height: 1.6;
-    color: #4a8;
-    scrollbar-width: thin;
-    scrollbar-color: var(--border) transparent;
-  }
-
-  #log-terminal .log-line { word-break: break-all; margin-bottom: 1px; }
-  #log-terminal .log-line.err  { color: var(--red); }
-  #log-terminal .log-line.warn { color: var(--yellow); }
-  #log-terminal .log-line.info { color: #4af; }
-
-  /* System stats */
-  .sys-stats {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 8px;
-    padding: 12px 16px 16px;
-  }
-
-  .sys-stat {
-    background: var(--bg3);
-    border-radius: 4px;
-    padding: 8px 10px;
-  }
-
-  .sys-stat-label {
-    font-size: 9px;
-    letter-spacing: 1px;
-    color: var(--muted);
-    text-transform: uppercase;
-    margin-bottom: 4px;
-  }
-
-  .sys-stat-bar {
-    height: 3px;
-    background: var(--border);
-    border-radius: 2px;
-    margin-bottom: 4px;
-    overflow: hidden;
-  }
-
-  .sys-stat-fill {
-    height: 100%;
-    border-radius: 2px;
-    background: var(--accent2);
-    transition: width 0.5s ease;
-  }
-
-  .sys-stat-val {
-    font-family: var(--font-mono);
-    font-size: 11px;
-    color: var(--text);
-  }
-
-  /* Responsive helpers */
-  .span2 { grid-column: span 2; }
-</style>
-</head>
-<body>
-<div class="shell">
-
-  <header>
-    <div class="logo">
-      <div class="logo-icon"></div>
-      <div class="logo-text">
-        <h1>AIC Monitor</h1>
-        <p>Astronomical Signal Classifier &nbsp;·&nbsp; 1420 MHz</p>
-      </div>
-    </div>
-    <div class="header-right">
-      <div id="connection-badge">
-        <span class="dot" id="conn-dot"></span>
-        <span id="conn-label">CONNECTING</span>
-      </div>
-      <div id="utc-clock">--:--:-- UTC</div>
-    </div>
-  </header>
-
-  <div id="detection-banner">
-    <span class="banner-icon">★</span>
-    <span>SIGNAL DETECTED — CONFIDENCE <span id="banner-conf">0.00</span></span>
-    <span class="banner-icon">★</span>
-  </div>
-
-  <!-- Metric cards -->
-  <div class="metrics-row">
-    <div class="metric-card" id="card-freq">
-      <div class="metric-label">Frequency</div>
-      <div class="metric-value" id="m-freq">—</div>
-      <div class="metric-sub">Hydrogen Line</div>
-    </div>
-    <div class="metric-card" id="card-strength">
-      <div class="metric-label">Signal Strength</div>
-      <div class="metric-value" id="m-strength">— dB</div>
-      <div class="metric-sub">RMS power</div>
-    </div>
-    <div class="metric-card" id="card-conf">
-      <div class="metric-label">Confidence</div>
-      <div class="metric-value" id="m-conf">0.000</div>
-      <div class="metric-sub">Model output</div>
-    </div>
-    <div class="metric-card" id="card-det">
-      <div class="metric-label">Detection</div>
-      <div class="metric-value" id="m-det">NO</div>
-      <div class="metric-sub" id="m-det-sub">Awaiting signal</div>
-    </div>
-    <div class="metric-card" id="card-ts">
-      <div class="metric-label">Last Update</div>
-      <div class="metric-value" style="font-size:13px" id="m-ts">—</div>
-      <div class="metric-sub">Timestamp</div>
-    </div>
-  </div>
-
-  <!-- Main charts -->
-  <div class="charts-grid">
-    <div class="panel">
-      <div class="panel-header">
-        <span class="panel-title">FFT Spectrum</span>
-        <span class="panel-badge" id="fft-res-badge">—</span>
-        <span class="panel-badge" id="sat-badge" style="display:none;background:rgba(255,60,90,0.15);color:#ff3c5a;border-color:rgba(255,60,90,0.4)">SATURATED — lower gain</span>
-      </div>
-      <div class="panel-body" style="padding:12px 12px 8px">
-        <canvas id="fft-chart" height="160"></canvas>
-      </div>
-    </div>
-    <div class="panel">
-      <div class="panel-header">
-        <span class="panel-title">Confidence History</span>
-        <span class="panel-badge">ROLLING 60s</span>
-      </div>
-      <div class="panel-body" style="padding:12px 12px 8px">
-        <canvas id="conf-chart" height="160"></canvas>
-      </div>
-    </div>
-  </div>
-
-  <!-- Waterfall -->
-  <div class="panel" style="margin-bottom:16px">
-    <div class="panel-header">
-      <span class="panel-title">Waterfall / Spectrogram</span>
-      <span class="panel-badge">TIME → FREQUENCY</span>
-    </div>
-    <canvas id="waterfall-canvas"></canvas>
-  </div>
-
-  <!-- Bottom row -->
-  <div class="bottom-row">
-    <!-- Log terminal -->
-    <div class="panel">
-      <div class="panel-header">
-        <span class="panel-title">System Log</span>
-        <span class="panel-badge" id="log-count-badge">0 lines</span>
-      </div>
-      <div class="panel-body" style="padding:8px">
-        <div id="log-terminal"></div>
-      </div>
-    </div>
-
-    <!-- Right column: gauge + system stats -->
-    <div style="display:flex;flex-direction:column;gap:16px">
-      <div class="panel">
-        <div class="panel-header">
-          <span class="panel-title">Detection Confidence</span>
-        </div>
-        <div id="conf-gauge-wrap">
-          <svg class="gauge-svg" viewBox="0 0 180 100">
-            <defs>
-              <linearGradient id="gaugeGrad" x1="0" y1="0" x2="1" y2="0">
-                <stop offset="0%"   stop-color="#0077ff"/>
-                <stop offset="50%"  stop-color="#00d4ff"/>
-                <stop offset="100%" stop-color="#00ff88"/>
-              </linearGradient>
-            </defs>
-            <!-- Track -->
-            <path d="M 20 90 A 70 70 0 0 1 160 90"
-                  fill="none" stroke="#1e2d42" stroke-width="10"
-                  stroke-linecap="round"/>
-            <!-- Arc -->
-            <path id="gauge-arc"
-                  d="M 20 90 A 70 70 0 0 1 160 90"
-                  fill="none" stroke="url(#gaugeGrad)" stroke-width="10"
-                  stroke-linecap="round"
-                  stroke-dasharray="220" stroke-dashoffset="220"/>
-            <!-- Value text -->
-            <text id="gauge-text" x="90" y="82" text-anchor="middle">0.000</text>
-            <text id="gauge-label" x="90" y="98" text-anchor="middle">CONFIDENCE</text>
-          </svg>
-        </div>
-      </div>
-
-      <div class="panel">
-        <div class="panel-header">
-          <span class="panel-title">System Resources</span>
-        </div>
-        <div class="sys-stats">
-          <div class="sys-stat">
-            <div class="sys-stat-label">CPU</div>
-            <div class="sys-stat-bar"><div class="sys-stat-fill" id="bar-cpu" style="width:0%"></div></div>
-            <div class="sys-stat-val" id="val-cpu">0%</div>
-          </div>
-          <div class="sys-stat">
-            <div class="sys-stat-label">Memory</div>
-            <div class="sys-stat-bar"><div class="sys-stat-fill" id="bar-mem" style="width:0%"></div></div>
-            <div class="sys-stat-val" id="val-mem">0%</div>
-          </div>
-          <div class="sys-stat">
-            <div class="sys-stat-label">Proc RAM</div>
-            <div class="sys-stat-bar"><div class="sys-stat-fill" id="bar-proc" style="width:0%;background:var(--accent)"></div></div>
-            <div class="sys-stat-val" id="val-proc">0 MB</div>
-          </div>
-          <div class="sys-stat">
-            <div class="sys-stat-label">GPU</div>
-            <div class="sys-stat-bar"><div class="sys-stat-fill" id="bar-gpu" style="width:0%;background:var(--green)"></div></div>
-            <div class="sys-stat-val" id="val-gpu">N/A</div>
-          </div>
-        </div>
-      </div>
-    </div>
-  </div>
-
-</div><!-- /shell -->
-
-<script>
-// ---------------------------------------------------------------------------
-// Clock
-// ---------------------------------------------------------------------------
-function updateClock() {
-  const now = new Date();
-  const h = String(now.getUTCHours()).padStart(2,'0');
-  const m = String(now.getUTCMinutes()).padStart(2,'0');
-  const s = String(now.getUTCSeconds()).padStart(2,'0');
-  document.getElementById('utc-clock').textContent = h+':'+m+':'+s+' UTC';
+"""web.py — Flask API for the AIC signal monitor.
+
+Changes vs original
+-------------------
+PERF: fft_history was list[-100:] which creates a new list on every
+      /api/signal request under the lock.  Replaced with
+      collections.deque(maxlen=100) so appending and slicing are O(1).
+
+NEW:  /api/signal now returns hi_peak_velocity_km_s and hi_snr so the
+      dashboard can render the Doppler-shifted HI profile.
+
+FIX:  latest_data and data_lock are defined once here and re-exported;
+      aic2.py imports them from web so both modules share the same
+      objects.  This eliminates the "shallow rebind" issue.
+"""
+
+from flask import Flask, render_template, jsonify, Response, request
+import os
+import numpy as np
+from collections import deque
+from datetime import datetime
+import logging
+import queue
+from threading import Lock
+
+from logging_setup import configure_logging
+
+logger = configure_logging()
+logging.getLogger('werkzeug').setLevel(logging.ERROR)
+
+# ── SSE log queue ─────────────────────────────────────────────────────────────
+log_queue: queue.Queue = queue.Queue(maxsize=500)
+
+
+class _QueueHandler(logging.Handler):
+    def emit(self, record):
+        try:
+            log_queue.put_nowait(self.format(record))
+        except queue.Full:
+            pass
+
+
+_qh = _QueueHandler()
+_qh.setFormatter(logging.Formatter('%(asctime)s %(levelname)s [%(name)s] %(message)s'))
+logger.addHandler(_qh)
+
+app = Flask(__name__)
+
+# ── Shared state ──────────────────────────────────────────────────────────────
+# Use a deque for fft_history so append is O(1) and we never allocate
+# a new list under the lock.
+latest_data: dict = {
+    'fft_data': {
+        'frequency': list(np.linspace(1420.0, 1420.4, 256)),
+        'magnitude': [0.0] * 256,
+        'power':     [0.0] * 256,
+        'phase':     [0.0] * 256,
+    },
+    'fft_history':            deque(maxlen=100),   # was list → deque
+    'signal_strength':        'N/A',
+    'signal_strength_db':     None,
+    'confidence':             0.0,
+    'detection':              False,
+    'stable_detection':       False,
+    'timestamp':              datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+    'hi_peak_velocity_km_s':  0.0,
+    'hi_snr':                 0.0,
 }
-setInterval(updateClock, 1000);
-updateClock();
+data_lock: Lock = Lock()
 
-// ---------------------------------------------------------------------------
-// FFT chart
-// ---------------------------------------------------------------------------
-const fftCtx = document.getElementById('fft-chart').getContext('2d');
-const fftChart = new Chart(fftCtx, {
-  type: 'line',
-  data: {
-    labels: [],
-    datasets: [{
-      label: 'Power (dB)',
-      data: [],
-      borderColor: '#00d4ff',
-      backgroundColor: 'rgba(0,212,255,0.07)',
-      borderWidth: 1.5,
-      pointRadius: 0,
-      fill: true,
-      tension: 0.1,
-    }]
-  },
-  options: {
-    animation: false,
-    responsive: true,
-    maintainAspectRatio: false,
-    plugins: { legend: { display: false } },
-    scales: {
-      x: {
-        ticks: { color: '#4a6080', font: { family: 'Space Mono', size: 9 }, maxTicksLimit: 8 },
-        grid: { color: '#1e2d42' },
-        title: { display: true, text: 'MHz', color: '#4a6080', font: { size: 10 } }
-      },
-      y: {
-        ticks: { color: '#4a6080', font: { family: 'Space Mono', size: 9 } },
-        grid: { color: '#1e2d42' },
-        title: { display: true, text: 'dB', color: '#4a6080', font: { size: 10 } }
-      }
-    }
-  }
-});
 
-function updateFFTChart(freqs, mags) {
-  if (!freqs || freqs.length === 0 || !mags || mags.length === 0) return;
+# ── Helpers ───────────────────────────────────────────────────────────────────
+def _to_list(val):
+    if val is None:
+        return []
+    if isinstance(val, np.ndarray):
+        return val.tolist()
+    if isinstance(val, deque):
+        return list(val)
+    try:
+        return [float(v) for v in val]
+    except Exception:
+        return []
 
-  // Detect saturation: all magnitudes nearly identical = flat spectrum = clipped ADC
-  const magArr = mags.map(Number).filter(v => isFinite(v));
-  const magMax = Math.max(...magArr);
-  const magMin = Math.min(...magArr);
-  const isSaturated = (magMax - magMin) < 0.01 && magMax > 0;
-  document.getElementById('sat-badge').style.display = isSaturated ? 'inline-block' : 'none';
 
-  // Convert magnitude to dB — adds dynamic range so peaks are visible
-  // Add small epsilon to avoid log(0)
-  const dbArr = magArr.map(v => 20 * Math.log10(Math.max(v, 1e-12)));
+# ── Routes ────────────────────────────────────────────────────────────────────
+@app.route('/')
+def index():
+    return render_template('index.html')
 
-  // Downsample to max 256 points for clean rendering
-  const TARGET = 256;
-  const stride = Math.max(1, Math.floor(freqs.length / TARGET));
-  const lbls = [], vals = [];
-  for (let i = 0; i < freqs.length; i += stride) {
-    const f = parseFloat(freqs[i]);
-    lbls.push(isFinite(f) ? f.toFixed(3) : '');
-    vals.push(isFinite(dbArr[i]) ? parseFloat(dbArr[i].toFixed(2)) : null);
-  }
 
-  // Dynamic Y axis: floor at (peak - 60dB), ceil at peak + 3dB
-  const validVals = vals.filter(v => v !== null);
-  if (validVals.length > 0) {
-    const yMax = Math.max(...validVals);
-    const yMin = yMax - 60;
-    fftChart.options.scales.y.min = Math.floor(yMin);
-    fftChart.options.scales.y.max = Math.ceil(yMax + 3);
-  }
+@app.route('/api/status')
+def get_status():
+    return jsonify({'status': 'ok', 'timestamp': datetime.now().isoformat()})
 
-  fftChart.data.labels = lbls;
-  fftChart.data.datasets[0].data = vals;
-  fftChart.update('none');
-  document.getElementById('fft-res-badge').textContent = lbls.length + ' bins';
-}
 
-// ---------------------------------------------------------------------------
-// Confidence history chart
-// ---------------------------------------------------------------------------
-const confCtx = document.getElementById('conf-chart').getContext('2d');
-const CONF_MAX_POINTS = 120;
-const confHistory = new Array(CONF_MAX_POINTS).fill(0);
-const confChart = new Chart(confCtx, {
-  type: 'line',
-  data: {
-    labels: new Array(CONF_MAX_POINTS).fill(''),
-    datasets: [{
-      label: 'Confidence',
-      data: [...confHistory],
-      borderColor: '#00ff88',
-      backgroundColor: 'rgba(0,255,136,0.06)',
-      borderWidth: 1.5,
-      pointRadius: 0,
-      fill: true,
-      tension: 0.3,
-    }, {
-      label: 'Threshold',
-      data: new Array(CONF_MAX_POINTS).fill(0.5),
-      borderColor: 'rgba(255,60,90,0.5)',
-      borderWidth: 1,
-      borderDash: [4, 4],
-      pointRadius: 0,
-      fill: false,
-    }]
-  },
-  options: {
-    animation: false,
-    responsive: true,
-    maintainAspectRatio: false,
-    plugins: { legend: { display: false } },
-    scales: {
-      x: { display: false },
-      y: {
-        ticks: { color: '#4a6080', font: { family: 'Space Mono', size: 9 } },
-        grid: { color: '#1e2d42' },
-        min: 0, max: 1,
-      }
-    }
-  }
-});
+@app.route('/api/signal')
+def get_signal():
+    with data_lock:
+        # ── Basic fields ───────────────────────────────────────────────────
+        snapshot = {
+            'timestamp':              latest_data.get('timestamp', ''),
+            'frequency':              latest_data.get('frequency', ''),
+            'signal_strength':        latest_data.get('signal_strength', 'N/A'),
+            'signal_strength_db':     latest_data.get('signal_strength_db'),
+            'confidence':             float(latest_data.get('confidence', 0.0)),
+            'detection':              bool(latest_data.get('detection', False)),
+            'stable_detection':       bool(latest_data.get('stable_detection', False)),
+            'raw_model_output':       float(latest_data.get('raw_model_output', 0.0)),
+            'buffer_stats':           latest_data.get('buffer_stats', {}),
+            'system_status':          latest_data.get('system_status', {}),
+            'hi_peak_velocity_km_s':  float(latest_data.get('hi_peak_velocity_km_s', 0.0)),
+            'hi_snr':                 float(latest_data.get('hi_snr', 0.0)),
+            'freq_start_mhz':         float(latest_data.get('freq_start_mhz', 1420.0)),
+            'freq_stop_mhz':          float(latest_data.get('freq_stop_mhz',  1420.4)),
+            'sample_rate_mhz':        float(latest_data.get('sample_rate_mhz', 2.0)),
+        }
 
-// ---------------------------------------------------------------------------
-// Waterfall
-// ---------------------------------------------------------------------------
-const wfCanvas = document.getElementById('waterfall-canvas');
-const wfCtx = wfCanvas.getContext('2d');
-const WF_ROWS = 60;
-let wfBuffer = [];
-let wfWidth = 0;
+        # ── FFT data with zoom window ──────────────────────────────────────
+        raw_fft       = latest_data.get('fft_data', {})
+        fft_freq_all  = _to_list(raw_fft.get('frequency', []))
+        fft_mag_all   = [abs(float(v)) for v in raw_fft.get('magnitude', [])]
+        fft_power_all = _to_list(raw_fft.get('power', []))
+        fft_phase_all = _to_list(raw_fft.get('phase', []))
 
-function initWaterfall() {
-  wfCanvas.width = wfCanvas.offsetWidth || 800;
-  wfCanvas.height = WF_ROWS * 3;
-  wfWidth = wfCanvas.width;
-}
-initWaterfall();
-window.addEventListener('resize', initWaterfall);
+        center_mhz    = (snapshot['freq_start_mhz'] + snapshot['freq_stop_mhz']) / 2.0
+        half_span_mhz = (snapshot['freq_stop_mhz']  - snapshot['freq_start_mhz']) / 2.0
+        try:
+            zoom = float(request.args.get('zoom', 1.0))
+        except Exception:
+            zoom = 1.0
 
-function powerToColor(v) {
-  // Map [0,1] → deep blue → cyan → green → yellow → red
-  v = Math.max(0, Math.min(1, v));
-  let r, g, b;
-  if (v < 0.25) {
-    const t = v / 0.25;
-    r = 0; g = Math.round(t * 100); b = Math.round(100 + t * 155);
-  } else if (v < 0.5) {
-    const t = (v - 0.25) / 0.25;
-    r = 0; g = Math.round(100 + t * 155); b = 255;
-  } else if (v < 0.75) {
-    const t = (v - 0.5) / 0.25;
-    r = Math.round(t * 255); g = 255; b = Math.round(255 - t * 255);
-  } else {
-    const t = (v - 0.75) / 0.25;
-    r = 255; g = Math.round(255 - t * 200); b = 0;
-  }
-  return `rgb(${r},${g},${b})`;
-}
+        lo_mhz = center_mhz - half_span_mhz * zoom
+        hi_mhz = center_mhz + half_span_mhz * zoom
 
-function drawWaterfall(row) {
-  if (!row || row.length === 0) return;
-  wfBuffer.push(row);
-  if (wfBuffer.length > WF_ROWS) wfBuffer.shift();
+        if fft_freq_all and len(fft_freq_all) == len(fft_mag_all):
+            idx = [i for i, f in enumerate(fft_freq_all) if lo_mhz <= f <= hi_mhz]
+        else:
+            idx = list(range(len(fft_freq_all)))
 
-  // Shift existing image down by 3px
-  const img = wfCtx.getImageData(0, 0, wfWidth, wfCanvas.height - 3);
-  wfCtx.putImageData(img, 0, 3);
+        if idx:
+            fft_freq      = [fft_freq_all[i]  for i in idx]
+            fft_magnitude = [fft_mag_all[i]   for i in idx]
+            fft_power_raw = [fft_power_all[i] for i in idx] if fft_power_all else []
+            fft_phase     = [fft_phase_all[i] for i in idx] if fft_phase_all else []
+        else:
+            fft_freq = fft_freq_all; fft_magnitude = fft_mag_all
+            fft_power_raw = fft_power_all; fft_phase = fft_phase_all
 
-  // Draw new row at top
-  const sliceW = wfWidth / row.length;
-  for (let i = 0; i < row.length; i++) {
-    wfCtx.fillStyle = powerToColor(row[i]);
-    wfCtx.fillRect(Math.floor(i * sliceW), 0, Math.max(1, Math.ceil(sliceW)), 3);
-  }
-}
+        # Normalise power 0-1 for waterfall
+        if fft_power_raw:
+            p = np.array(fft_power_raw, dtype=np.float64)
+            p_norm = ((p - p.min()) / max(float(p.ptp()), 1e-12)).tolist()
+        else:
+            p_norm = []
 
-// ---------------------------------------------------------------------------
-// Gauge
-// ---------------------------------------------------------------------------
-const gaugeArc    = document.getElementById('gauge-arc');
-const gaugeText   = document.getElementById('gauge-text');
-const GAUGE_LEN   = 220;
+        snapshot['fft_data'] = {
+            'frequency': fft_freq,
+            'magnitude': fft_magnitude,
+            'power':     fft_power_raw,
+            'phase':     fft_phase,
+        }
+        # Backward-compat flat aliases
+        snapshot['fft_freq']      = fft_freq
+        snapshot['fft_magnitude'] = fft_magnitude
 
-function updateGauge(val) {
-  const offset = GAUGE_LEN - (val * GAUGE_LEN);
-  gaugeArc.setAttribute('stroke-dashoffset', offset.toFixed(2));
-  gaugeText.textContent = val.toFixed(3);
-  const col = val > 0.7 ? '#00ff88' : val > 0.4 ? '#00d4ff' : '#0077ff';
-  gaugeArc.setAttribute('stroke', col);
-}
+        # ── Waterfall history (O(1) append, O(1) slice via deque) ─────────
+        hist = latest_data['fft_history']          # already a deque(maxlen=100)
+        if p_norm:
+            hist.append(p_norm)                    # O(1) — deque handles eviction
+        snapshot['fft_power_db_normalized'] = list(hist)   # snapshot copy
 
-// ---------------------------------------------------------------------------
-// Metric card helpers
-// ---------------------------------------------------------------------------
-function setMetric(id, value, cls) {
-  const el = document.getElementById(id);
-  if (!el) return;
-  el.textContent = value;
-  el.className = 'metric-value' + (cls ? ' ' + cls : '');
-}
+    return jsonify(snapshot)
 
-function setBar(barId, valId, pct, label) {
-  const b = document.getElementById(barId);
-  const v = document.getElementById(valId);
-  if (b) b.style.width = Math.min(100, pct).toFixed(1) + '%';
-  if (v) v.textContent = label;
-}
 
-// ---------------------------------------------------------------------------
-// Poll /api/signal
-// ---------------------------------------------------------------------------
-let lastConf = 0;
-let pollErrors = 0;
+@app.route('/api/plots')
+def get_plot_data():
+    output_dir = 'output'
+    data = {'plots': [], 'spectrograms': [], 'timestamp': datetime.now().isoformat()}
+    if os.path.exists(output_dir):
+        for f in os.listdir(output_dir):
+            if f.startswith('signal_strength_plot'):
+                data['plots'].append(f)
+            elif f.startswith('spectrogram'):
+                data['spectrograms'].append(f)
+    return jsonify(data)
 
-async function fetchSignal() {
-  try {
-    const res = await fetch('/api/signal');
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    const d = await res.json();
-    pollErrors = 0;
 
-    // Connection badge
-    document.getElementById('conn-dot').className = 'dot live';
-    document.getElementById('conn-label').textContent = 'LIVE';
+@app.route('/logs')
+def stream_logs():
+    def generate():
+        while True:
+            try:
+                msg  = log_queue.get(timeout=1.0)
+                safe = msg.replace('\n', ' ').replace('\r', '')
+                yield f'data: {safe}\n\n'
+            except queue.Empty:
+                yield 'data: \n\n'
 
-    // Metrics
-    setMetric('m-freq', d.frequency || '—');
-    setMetric('m-strength', d.signal_strength || '—');
+    return Response(generate(), mimetype='text/event-stream',
+                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
 
-    const conf = parseFloat(d.confidence) || 0;
-    setMetric('m-conf', conf.toFixed(3), conf > 0.7 ? 'up' : conf > 0.4 ? 'warn' : '');
-    updateGauge(conf);
 
-    // Push to confidence history
-    confHistory.shift();
-    confHistory.push(conf);
-    confChart.data.datasets[0].data = [...confHistory];
-    confChart.update('none');
+# ── Standalone entry point ────────────────────────────────────────────────────
+if __name__ == '__main__':
+    import aic2 as aic_module
+    from threading import Thread
 
-    // Detection state
-    const det = d.stable_detection || d.detection || false;
-    setMetric('m-det', det ? 'YES' : 'NO', det ? 'up' : '');
-    document.getElementById('m-det-sub').textContent = det ? 'Signal confirmed' : 'No signal';
-    document.getElementById('card-det').classList.toggle('highlight', det);
+    os.makedirs('output', exist_ok=True)
+    aic_module.latest_data = latest_data
+    aic_module.data_lock   = data_lock
 
-    // Banner
-    const banner = document.getElementById('detection-banner');
-    if (det) {
-      banner.classList.add('show');
-      document.getElementById('banner-conf').textContent = conf.toFixed(3);
-    } else {
-      banner.classList.remove('show');
-    }
+    Thread(target=aic_module.main, daemon=True).start()
 
-    // Timestamp
-    setMetric('m-ts', d.timestamp ? d.timestamp.split(' ')[1] : '—');
-
-    // FFT
-    const fft = d.fft_data || {};
-    const freqs = fft.frequency || [];
-    const mags  = fft.magnitude || [];
-    updateFFTChart(freqs, mags);
-
-    // Update FFT panel to show actual configured frequency range
-    if (d.freq_start_mhz && d.freq_stop_mhz) {
-      const span = (d.freq_stop_mhz - d.freq_start_mhz).toFixed(3);
-      document.getElementById('fft-res-badge').title =
-        `${d.freq_start_mhz.toFixed(3)} – ${d.freq_stop_mhz.toFixed(3)} MHz | ${d.sample_rate_mhz} MHz BW`;
-    }
-
-    // Waterfall: take latest power row
-    const history = d.fft_power_db_normalized || [];
-    if (history.length > 0) {
-      drawWaterfall(history[history.length - 1]);
-    }
-
-    // System stats
-    const sys = d.system_status || {};
-    const cpu = parseFloat(sys.cpu_usage) || 0;
-    const mem = parseFloat(sys.memory_usage) || 0;
-    const proc = parseFloat(sys.process_memory) || 0;
-    const gpu = sys.gpu_available;
-    setBar('bar-cpu', 'val-cpu', cpu, cpu.toFixed(1) + '%');
-    setBar('bar-mem', 'val-mem', mem, mem.toFixed(1) + '%');
-    setBar('bar-proc', 'val-proc', Math.min(100, proc / 20), proc.toFixed(0) + ' MB');
-    document.getElementById('val-gpu').textContent = gpu ? 'Active' : 'CPU only';
-    document.getElementById('bar-gpu').style.width = gpu ? '100%' : '0%';
-
-  } catch (err) {
-    pollErrors++;
-    if (pollErrors >= 3) {
-      document.getElementById('conn-dot').className = 'dot error';
-      document.getElementById('conn-label').textContent = 'OFFLINE';
-    }
-  }
-}
-
-setInterval(fetchSignal, 1000);
-fetchSignal();
-
-// ---------------------------------------------------------------------------
-// SSE log stream
-// ---------------------------------------------------------------------------
-const terminal = document.getElementById('log-terminal');
-let logCount = 0;
-const MAX_LOG_LINES = 200;
-
-const sse = new EventSource('/logs');
-sse.onmessage = (e) => {
-  if (!e.data || e.data.trim() === '') return;
-  // Strip lines that contain IP addresses or HTTP access log entries
-  const raw = e.data;
-  if (/\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/.test(raw)) return;
-  if (/\"(GET|POST|PUT|DELETE|HEAD|OPTIONS)\s/.test(raw)) return;
-  logCount++;
-  const line = document.createElement('div');
-  line.className = 'log-line';
-  const txt = e.data;
-  if (/ERROR/i.test(txt)) line.classList.add('err');
-  else if (/WARNING|WARN/i.test(txt)) line.classList.add('warn');
-  else if (/INFO/i.test(txt)) line.classList.add('info');
-  line.textContent = txt;
-  terminal.appendChild(line);
-  // Trim old lines
-  while (terminal.childElementCount > MAX_LOG_LINES) {
-    terminal.removeChild(terminal.firstChild);
-  }
-  terminal.scrollTop = terminal.scrollHeight;
-  document.getElementById('log-count-badge').textContent = logCount + ' lines';
-};
-sse.onerror = () => {
-  const line = document.createElement('div');
-  line.className = 'log-line warn';
-  line.textContent = '[SSE connection lost — retrying]';
-  terminal.appendChild(line);
-};
-</script>
-</body>
-</html>
+    logger.info('Starting web server on http://0.0.0.0:5000')
+    app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)

@@ -39,33 +39,69 @@ def save_fits(processed_samples, output_dir, timestamp):
     logger.info(f"Saved FITS: {filename}")
 
 
-def save_detected_signal(processed_samples, timestamp, output_dir):
+def save_detected_signal(processed_samples, timestamp, output_dir,
+                          pointing_meta: dict = None,
+                          flux_jy: float = None,
+                          t_ant_k: float = None,
+                          hi_peak_vel_kms: float = None,
+                          hi_snr: float = None,
+                          dedisp_dm: float = None,
+                          dedisp_snr: float = None):
+    """Save detection FITS files with full astrometric and calibration metadata.
+
+    Parameters
+    ----------
+    pointing_meta : dict from coordinates.get_pointing_metadata() — adds
+                    RA, Dec, Glon, Glat, Az, El, LST, LSR correction to FITS.
+    flux_jy       : estimated flux density in Jansky (from radiometry module).
+    t_ant_k       : antenna temperature in K.
+    hi_peak_vel_kms: HI peak velocity in LSR frame (km/s).
+    hi_snr        : HI line SNR.
+    dedisp_dm     : best dedispersion DM (pc/cm³).
+    dedisp_snr    : peak dedispersion SNR (sigma).
+    """
     detection_path = os.path.join(output_dir, 'detections', timestamp.strftime("%Y%m%d_%H%M%S"))
     os.makedirs(detection_path, exist_ok=True)
 
-    # Support either a single array or a tuple (full_decimated, raw_complex)
     if isinstance(processed_samples, (list, tuple)) and len(processed_samples) == 2:
         full_buf, raw_buf = processed_samples
     else:
         full_buf = processed_samples
         raw_buf = None
 
-    # Write full (decimated magnitude) FITS
     fits_path_full = os.path.join(detection_path, f'signal_full_{timestamp.strftime("%Y%m%d_%H%M%S")}.fits')
     logger.debug(f"Writing full FITS file to: {fits_path_full}")
     try:
         hdr = fits.Header()
-        hdr['DATE-OBS'] = timestamp.strftime("%Y-%m-%d")
-        hdr['TIME-OBS'] = timestamp.strftime("%H:%M:%S")
-        hdr['FREQ-ST'] = f"{FREQ_START/1e6:.2f}"
+        hdr['DATE-OBS'] = timestamp.strftime("%Y-%m-%dT%H:%M:%S")
+        hdr['FREQ-ST']  = f"{FREQ_START/1e6:.2f}"
         hdr['FREQ-END'] = f"{FREQ_START/1e6 + (FREQ_STOP-FREQ_START)/1e6:.2f}"
-        hdr['TELESCOP'] = 'HackRF'
-        hdr['INSTRUME'] = 'USB'
-        hdr['LOCATION'] = 'Automated System'
-        hdr['OBSERVER'] = 'Automated System'
-        hdr['SIGNAL'] = float(np.mean(np.abs(full_buf))) if full_buf is not None else 0.0
-        hdr['SAMPRATE'] = f"{FS}"
-        hdr['BANDWIDT'] = f"{(FREQ_STOP - FREQ_START):e}"
+        hdr['TELESCOP'] = 'HackRF One'
+        hdr['INSTRUME'] = 'SDR-USB'
+        hdr['SAMPRATE'] = float(FS)
+        hdr['BANDWIDT'] = float(FREQ_STOP - FREQ_START)
+        hdr['SIGNAL']   = float(np.mean(np.abs(full_buf))) if full_buf is not None else 0.0
+
+        # Calibration metadata
+        if flux_jy  is not None: hdr['FLUX_JY']  = (float(flux_jy),  '[Jy] Estimated flux density')
+        if t_ant_k  is not None: hdr['T_ANT_K']  = (float(t_ant_k),  '[K] Antenna temperature')
+        if hi_peak_vel_kms is not None:
+            hdr['HI_VEL']  = (float(hi_peak_vel_kms), '[km/s] HI peak velocity (LSR)')
+        if hi_snr   is not None: hdr['HI_SNR']   = (float(hi_snr),   'HI line SNR')
+        if dedisp_dm  is not None: hdr['DM']      = (float(dedisp_dm), '[pc/cm3] Best DM trial')
+        if dedisp_snr is not None: hdr['DM_SNR']  = (float(dedisp_snr),'Dedispersion SNR')
+
+        # Astrometric metadata from pointing module
+        if pointing_meta:
+            try:
+                from coordinates import pointing_to_fits_header
+                for key, val in pointing_to_fits_header(pointing_meta).items():
+                    if isinstance(val, tuple):
+                        hdr[key] = val
+                    else:
+                        hdr[key] = val
+            except Exception as pe:
+                logger.warning(f"Could not write pointing metadata: {pe}")
 
         full_arr = np.abs(full_buf).astype(np.float64) if full_buf is not None else np.array([], dtype=np.float64)
         primary_hdu = fits.PrimaryHDU(full_arr, header=hdr)
@@ -74,20 +110,24 @@ def save_detected_signal(processed_samples, timestamp, output_dir):
         hdul = fits.HDUList([primary_hdu, fft_hdu])
         hdul.writeto(fits_path_full, overwrite=True)
         hdul.close()
-        logger.info(f"Signal full data saved to FITS file: {fits_path_full}")
+        logger.info(f"Detection FITS saved: {fits_path_full}")
+        return fits_path_full
     except Exception as e:
         logger.error(f"Failed to write full FITS: {e}")
+        return None
 
-    # Write raw complex snapshot FITS if available
     if raw_buf is not None:
         fits_path_raw = os.path.join(detection_path, f'signal_raw_{timestamp.strftime("%Y%m%d_%H%M%S")}.fits')
         try:
             raw_arr = np.asarray(raw_buf, dtype=np.complex64)
             hdu = fits.PrimaryHDU(raw_arr)
-            hdu.header['NOTE'] = 'Raw complex snapshot (complex64)'
-            hdu.header['SAMPRATE'] = f"{FS}"
+            hdu.header['NOTE']    = 'Raw complex snapshot (complex64)'
+            hdu.header['SAMPRATE'] = float(FS)
+            if pointing_meta:
+                hdu.header['RA']  = pointing_meta.get('ra_deg',  float('nan'))
+                hdu.header['DEC'] = pointing_meta.get('dec_deg', float('nan'))
             hdu.writeto(fits_path_raw, overwrite=True)
-            logger.info(f"Signal raw snapshot saved to FITS file: {fits_path_raw}")
+            logger.info(f"Raw snapshot FITS saved: {fits_path_raw}")
         except Exception as e:
             logger.error(f"Failed to write raw FITS: {e}")
 
