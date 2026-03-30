@@ -81,19 +81,31 @@ class CandidateDB:
     def __init__(self, db_path: str = 'output/candidates.db'):
         self.db_path = db_path
         os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
+        # Persistent connection — avoids open/close overhead on every insert.
+        # check_same_thread=False is safe because all writes come from the
+        # single processing thread; reads from the web thread use a separate
+        # short-lived connection via _read_connect().
+        self._write_conn: sqlite3.Connection = sqlite3.connect(
+            self.db_path, timeout=10, check_same_thread=False)
+        self._write_conn.row_factory = sqlite3.Row
+        self._write_conn.execute('PRAGMA journal_mode=WAL')
+        self._write_conn.execute('PRAGMA synchronous=NORMAL')
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, timeout=10,
-                               check_same_thread=False)
+        """Return the persistent write connection."""
+        return self._write_conn
+
+    def _read_connect(self) -> sqlite3.Connection:
+        """Short-lived read connection for web thread queries."""
+        conn = sqlite3.connect(self.db_path, timeout=5, check_same_thread=False)
         conn.row_factory = sqlite3.Row
-        conn.execute('PRAGMA journal_mode=WAL')   # concurrent readers
-        conn.execute('PRAGMA synchronous=NORMAL')
+        conn.execute('PRAGMA journal_mode=WAL')
         return conn
 
     def _init_db(self) -> None:
-        with self._connect() as conn:
-            conn.executescript(_SCHEMA)
+        self._write_conn.executescript(_SCHEMA)
+        self._write_conn.commit()
         logger.info(f'Candidate DB initialised: {self.db_path}')
 
     def insert(self,
@@ -163,7 +175,7 @@ class CandidateDB:
                flagged: Optional[int] = None) -> List[Dict[str, Any]]:
         """Return the N most recent candidates as list of dicts."""
         try:
-            with self._connect() as conn:
+            with self._read_connect() as conn:
                 where = 'WHERE confidence >= ?'
                 params: list = [min_confidence]
                 if flagged is not None:
@@ -182,7 +194,7 @@ class CandidateDB:
     def count(self) -> Dict[str, int]:
         """Return counts by flag status."""
         try:
-            with self._connect() as conn:
+            with self._read_connect() as conn:
                 rows = conn.execute(
                     'SELECT flagged, COUNT(*) as n FROM candidates GROUP BY flagged'
                 ).fetchall()
@@ -201,7 +213,7 @@ class CandidateDB:
     def export_csv(self, path: str) -> int:
         """Export all candidates to CSV. Returns number of rows written."""
         try:
-            with self._connect() as conn:
+            with self._read_connect() as conn:
                 rows = conn.execute(
                     'SELECT * FROM candidates ORDER BY timestamp_utc'
                 ).fetchall()
@@ -237,6 +249,3 @@ class CandidateDB:
         except Exception as e:
             logger.error(f'Histogram failed: {e}')
             return {'bins': [], 'counts': []}
-
-
-import numpy as np  # needed by hi_velocity_histogram

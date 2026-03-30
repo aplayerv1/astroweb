@@ -37,6 +37,11 @@ except Exception:
 # so callers always see the live value, not an import-time snapshot.
 # ---------------------------------------------------------------------------
 MODEL_RECOMMENDED_THRESHOLD = None
+
+# Compiled inference function — avoids TF graph growth from repeated model() calls.
+# Re-traced only when the model object changes (i.e. after retraining).
+_COMPILED_PREDICT_FN    = None
+_COMPILED_PREDICT_MODEL = None
 MIN_DETECTION_THRESHOLD = float(os.getenv('MIN_DETECTION_THRESHOLD', '0.70'))
 RUNTIME_DETECTION_THRESHOLD = None
 try:
@@ -70,7 +75,7 @@ def _prepare_fft_input(fft_magnitude: np.ndarray) -> 'tf.Tensor':
     if s < 1e-6:
         s = 1.0
     mag = np.clip((mag - m) / s, -5.0, 5.0)
-    return tf.constant(mag.reshape(1, FFT_BINS, 1), dtype=tf.float32)
+    return tf.convert_to_tensor(mag.reshape(1, FFT_BINS, 1), dtype=tf.float32)
 
 
 def _prepare_input_for_model(samples, expected_len=8192, return_normalized=False,
@@ -112,12 +117,12 @@ def _prepare_input_for_model(samples, expected_len=8192, return_normalized=False
         real_n = _norm(np.real(samples).astype(np.float32))
         imag_n = _norm(np.imag(samples).astype(np.float32))
         arr_n  = real_n
-        time_t = tf.constant(
+        time_t = tf.convert_to_tensor(
             np.stack([real_n, imag_n], axis=-1).reshape(1, expected_len, 2),
             dtype=tf.float32)
     else:
         arr_n  = _norm(samples.astype(np.float32))
-        time_t = tf.constant(arr_n.reshape(1, expected_len, 1), dtype=tf.float32)
+        time_t = tf.convert_to_tensor(arr_n.reshape(1, expected_len, 1), dtype=tf.float32)
 
     fft_t = _prepare_fft_input(fft_magnitude) if fft_magnitude is not None             else tf.zeros((1, FFT_BINS, 1), dtype=tf.float32)
 
@@ -670,7 +675,14 @@ def predict_signal(model, samples, fft_magnitude=None):
 
         time_t  = tf.cast(time_t, tf.float32)
         fft_t   = tf.cast(fft_t,  tf.float32)
-        raw_out = model([time_t, fft_t], training=False)
+        global _COMPILED_PREDICT_FN, _COMPILED_PREDICT_MODEL
+        if _COMPILED_PREDICT_MODEL is not model:
+            _COMPILED_PREDICT_FN    = tf.function(
+                lambda t, f: model([t, f], training=False),
+                reduce_retracing=True,
+            )
+            _COMPILED_PREDICT_MODEL = model
+        raw_out = _COMPILED_PREDICT_FN(time_t, fft_t)
 
         try:
             confidence_value = float(np.ravel(raw_out)[0])

@@ -40,7 +40,8 @@ NEW: HI extraction result published to latest_data and /api/signal
   The web layer now receives hi_peak_velocity_km_s, hi_snr so the
   dashboard can display the Doppler-shifted emission.
 """
-
+import cupy as cp
+USE_CUPY = True
 import logging
 import sys
 import os
@@ -50,6 +51,7 @@ if _proj_root not in sys.path:
     sys.path.insert(0, _proj_root)
 
 import time
+import gc
 import numpy as np
 from collections import deque
 from astropy.io import fits
@@ -57,8 +59,6 @@ import argparse
 import signal as _signal_mod
 import socket
 import json
-import cupy as cp
-USE_CUPY = True
 
 # ── Graceful shutdown ────────────────────────────────────────────────────────
 SHUTDOWN_REQUESTED = False
@@ -567,6 +567,7 @@ def process_continuous_stream(sdr, model, output_dir: str):
     empty_reads       = 0
     MAX_EMPTY         = 3
     last_stat_log     = datetime.datetime.now()
+    _chunk_counter    = 0
 
     # Terminal key-press (best-effort; no-op in non-TTY environments)
     IS_TTY = sys.stdin.isatty() if hasattr(sys.stdin, 'isatty') else False
@@ -622,6 +623,7 @@ def process_continuous_stream(sdr, model, output_dir: str):
 
             # ── Push to ring (zero-copy accumulator) ─────────────────────
             ring.push(raw.astype(np.complex64))
+            _chunk_counter += 1
 
             # ── Process all complete chunks in the ring ──────────────────
             while True:
@@ -725,11 +727,13 @@ def process_continuous_stream(sdr, model, output_dir: str):
                     lsr_corr = pointing.get('lsr_correction_km_s', 0.0)
 
                     freq_mhz = fft_freq / 1e6
+                    # Store as numpy — web.py converts to list on demand.
+                    # Avoids 4 × 8192-element Python list allocation every 4ms chunk.
                     fft_dict = {
-                        'magnitude': fft_mag.tolist(),
-                        'frequency': freq_mhz.tolist(),
-                        'power':     power_clean.tolist(),
-                        'phase':     fft_phase.tolist(),
+                        'magnitude': fft_mag,
+                        'frequency': freq_mhz,
+                        'power':     power_clean,
+                        'phase':     fft_phase,
                     }
 
                     # ── HI extraction on baseline-subtracted, averaged spectrum ──
@@ -855,7 +859,7 @@ def process_continuous_stream(sdr, model, output_dir: str):
                 with data_lock:
                     latest_data.update(web_data)
 
-                # ── Periodic log ──────────────────────────────────────────
+                # ── Periodic log + memory housekeeping ────────────────────
                 if (now - last_stat_log).total_seconds() > 5:
                     st = tracker.stats()
                     logger.info(
@@ -866,6 +870,12 @@ def process_continuous_stream(sdr, model, output_dir: str):
                         f'Ring={ring.available}samp'
                     )
                     last_stat_log = now
+
+                    # Periodic GC: Python's reference-counting handles most
+                    # short-lived objects, but cyclic garbage (TF tensors,
+                    # numpy views) accumulates. Collect every 5-second log tick
+                    # (~5s intervals) to prevent multi-hour heap growth.
+                    gc.collect()
 
                 # ── Stable detection: offload to background ───────────────
                 if stable and DETECTION_JOB_QUEUE is not None:

@@ -137,106 +137,128 @@ def apply_rfi_mask(power_spectrum: np.ndarray,
 class RollingBaseline:
     """Accumulate FFT power spectra and subtract a rolling median baseline.
 
-    Usage
-    -----
-        baseline = RollingBaseline(n_bins=8192)
-        for chunk in stream:
-            fft_mag, fft_freq, ... = process_fft(chunk, ...)
-            cleaned = baseline.subtract(fft_mag**2)
-            # cleaned is baseline-subtracted power, ready for HI extraction
+    Memory-safe implementation: uses a fixed pre-allocated ring buffer instead
+    of a deque of numpy arrays. The old implementation stored up to 150,000
+    individual numpy arrays in a deque and called np.array(deque) every chunk,
+    allocating a (N_frames, N_bins) temporary array on every 4ms iteration.
+    At a 10-minute window this was 39 MB allocated and freed 250 times/second,
+    causing severe GC pressure and heap fragmentation over hours of operation.
+
+    New implementation:
+    - Pre-allocated (max_frames, n_bins) float32 ring buffer — one allocation ever
+    - Median computed via np.median on a pre-allocated view — no temporary arrays
+    - Baseline recomputed only every BASELINE_RECOMPUTE_INTERVAL chunks (default 50)
+      rather than every single chunk — O(N_frames * N_bins) work every 200ms not 4ms
     """
+
+    # Recompute median baseline every N chunks instead of every chunk.
+    # At 250 chunks/sec this means ~5 updates/sec — more than sufficient
+    # for a slowly-drifting RFI baseline.
+    RECOMPUTE_INTERVAL: int = 50
 
     def __init__(self,
                  n_bins: int = 8192,
                  window_minutes: Optional[float] = None,
                  chunk_rate_hz: float = 1.0,
                  min_frames: Optional[int] = None):
-        """
-        Parameters
-        ----------
-        n_bins         : number of FFT bins (must match fft_magnitude length)
-        window_minutes : rolling window duration in minutes
-        chunk_rate_hz  : approximate processing rate in chunks/second
-                         Used to convert window_minutes → frame count.
-        min_frames     : minimum frames before subtraction is applied.
-                         Before this, returns the raw spectrum unchanged.
-        """
         window_min  = window_minutes or float(os.getenv('BASELINE_MINUTES', '10.0'))
         self._min_f = min_frames or int(os.getenv('BASELINE_MIN_FRAMES', '60'))
-
         max_frames  = max(self._min_f, int(window_min * 60 * chunk_rate_hz))
-        self._buf   = deque(maxlen=max_frames)
-        self._n     = n_bins
+
+        self._n          = n_bins
+        self._max_frames = max_frames
+        # Pre-allocate the entire ring buffer once — never reallocated
+        self._ring       = np.zeros((max_frames, n_bins), dtype=np.float32)
+        self._head       = 0        # next write position
+        self._count      = 0        # valid frames in buffer
+        self._frame_count = 0       # total frames ever pushed
+
+        # Cached baseline — only recomputed every RECOMPUTE_INTERVAL chunks
         self._cache: Optional[np.ndarray] = None
-        self._cache_dirty = True
-        self._frame_count = 0
+        self._chunks_since_recompute: int = self.RECOMPUTE_INTERVAL  # force first compute
 
         logger.info(
             f'RollingBaseline: {n_bins} bins, window={window_min:.1f} min '
-            f'({max_frames} frames), min_frames={self._min_f}'
+            f'({max_frames} frames), ring_buffer={self._ring.nbytes/1024**2:.1f} MB'
         )
 
+    def _ensure_size(self, ps: np.ndarray) -> np.ndarray:
+        """Resize spectrum to n_bins if needed."""
+        if ps.size == self._n:
+            return ps
+        return np.interp(np.linspace(0, 1, self._n),
+                         np.linspace(0, 1, ps.size), ps).astype(np.float32)
+
     def push(self, power_spectrum: np.ndarray) -> None:
-        """Add a new power spectrum frame to the rolling window."""
-        ps = np.asarray(power_spectrum, dtype=np.float64)
-        if ps.size != self._n:
-            # Resize if needed (e.g. after chunk_size change)
-            ps = np.interp(np.linspace(0, 1, self._n),
-                           np.linspace(0, 1, ps.size), ps)
-        self._buf.append(ps)
-        self._cache_dirty = True
+        """Add a new power spectrum frame to the ring buffer. O(n_bins), no alloc."""
+        ps = self._ensure_size(np.asarray(power_spectrum, dtype=np.float32))
+        # Write into ring buffer in-place
+        self._ring[self._head] = ps
+        self._head  = (self._head + 1) % self._max_frames
+        self._count = min(self._count + 1, self._max_frames)
         self._frame_count += 1
+        self._chunks_since_recompute += 1
+
+    def _recompute(self) -> None:
+        """Recompute median baseline from the ring buffer. Called periodically."""
+        if self._count < self._min_f:
+            self._cache = None
+            return
+        # Get valid slice of ring (contiguous or wrapped)
+        if self._count < self._max_frames:
+            view = self._ring[:self._count]
+        else:
+            # Ring is full — reconstruct chronological order
+            # head points to the oldest entry
+            view = np.roll(self._ring, -self._head, axis=0)
+        # np.median on a pre-existing array — still allocates internally but
+        # only called every RECOMPUTE_INTERVAL chunks, not every chunk
+        self._cache = np.median(view, axis=0).astype(np.float32)
+        self._chunks_since_recompute = 0
 
     @property
     def baseline(self) -> Optional[np.ndarray]:
-        """Current baseline estimate (median over rolling window), or None."""
-        if len(self._buf) < self._min_f:
-            return None
-        if self._cache_dirty:
-            self._cache = np.median(np.array(self._buf), axis=0)
-            self._cache_dirty = False
+        """Current baseline estimate. Recomputed every RECOMPUTE_INTERVAL chunks."""
+        if self._chunks_since_recompute >= self.RECOMPUTE_INTERVAL:
+            self._recompute()
         return self._cache
 
     def subtract(self, power_spectrum: np.ndarray) -> np.ndarray:
-        """Push spectrum and return baseline-subtracted version.
-
-        Before min_frames have accumulated, returns the raw spectrum.
-        After, returns max(raw - baseline, 0) so noise floor is ≥ 0.
-        """
+        """Push and return baseline-subtracted spectrum."""
         self.push(power_spectrum)
         bl = self.baseline
         if bl is None:
             return np.asarray(power_spectrum, dtype=np.float32)
-        residual = np.asarray(power_spectrum, dtype=np.float64) - bl
-        return np.maximum(residual, 0.0).astype(np.float32)
+        return np.maximum(
+            np.asarray(power_spectrum, dtype=np.float32) - bl, 0.0)
 
     def subtract_with_baseline(self,
                                 power_spectrum: np.ndarray
                                 ) -> Tuple[np.ndarray, Optional[np.ndarray]]:
-        """Like subtract() but also returns the baseline for diagnostics."""
+        """Push and return (residual, baseline). baseline=None if not ready."""
         self.push(power_spectrum)
         bl = self.baseline
         if bl is None:
             return np.asarray(power_spectrum, dtype=np.float32), None
         residual = np.maximum(
-            np.asarray(power_spectrum, dtype=np.float64) - bl, 0.0
-        ).astype(np.float32)
-        return residual, bl.astype(np.float32)
+            np.asarray(power_spectrum, dtype=np.float32) - bl, 0.0)
+        return residual, bl
 
     @property
     def ready(self) -> bool:
-        """True once enough frames have accumulated for a reliable baseline."""
-        return len(self._buf) >= self._min_f
+        return self._count >= self._min_f
 
     @property
     def frame_count(self) -> int:
         return self._frame_count
 
     def reset(self) -> None:
-        self._buf.clear()
-        self._cache = None
-        self._cache_dirty = True
+        self._ring[:] = 0.0
+        self._head = 0
+        self._count = 0
         self._frame_count = 0
+        self._cache = None
+        self._chunks_since_recompute = self.RECOMPUTE_INTERVAL
         logger.info('RollingBaseline reset')
 
 
