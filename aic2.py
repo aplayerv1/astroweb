@@ -132,9 +132,9 @@ except Exception:
 
 try:
     from logging_setup import configure_logging
-    _root_logger = configure_logging()
+    configure_logging()
 except Exception:
-    _root_logger = logging.getLogger()
+    pass  # configure_logging unavailable
 
 logger = logging.getLogger('aic')
 logger.setLevel(logging.DEBUG)
@@ -148,14 +148,9 @@ LNB_LOW  = float(os.getenv('LNB_LOW',  '9750000000'))
 LNB_HIGH = float(os.getenv('LNB_HIGH', '10600000000'))
 
 fs          = 2e6                          # 2 MHz sample rate
-sample_rate = fs
-HI_FREQ     = 1420.40575177e6             # Hz  (hydrogen line rest freq)
-bandwidth   = float(os.getenv('SDR_BANDWIDTH', str(fs)))
-center_freq = float(os.getenv('SDR_CENTER_FREQ', str(HI_FREQ)))
 freq_start  = 1420.390e6
 freq_stop   = 1420.419e6
 gain        = int(float(os.getenv('SDR_GAIN', '5')))
-USE_LNB     = False
 LO          = 0.0
 center_freq = (freq_start + freq_stop) / 2
 CONSECUTIVE_DETECTIONS = int(os.getenv('CONSECUTIVE_DETECTIONS', '3'))
@@ -165,9 +160,7 @@ try:
     from processing import (
         create_model, train_model, check_model_for_nans,
         calibrate_model_threshold, inject_wow_signal,
-        _prepare_input_for_model, predict_signal,
-        MODEL_RECOMMENDED_THRESHOLD, RUNTIME_DETECTION_THRESHOLD,
-        MIN_DETECTION_THRESHOLD,
+        predict_signal,
     )
 except Exception:
     logger.warning('processing module unavailable — using stubs')
@@ -184,22 +177,18 @@ except Exception:
     def check_model_for_nans(model): return True
     def calibrate_model_threshold(model, **kw): return {'recommended_threshold': None}
     def inject_wow_signal(s): return s
-    def _prepare_input_for_model(s, **kw): return np.zeros((1, 8192, 1), dtype=np.float32)
     def predict_signal(model, s): return False, 0.0
-    MODEL_RECOMMENDED_THRESHOLD = None
-    RUNTIME_DETECTION_THRESHOLD = None
-    MIN_DETECTION_THRESHOLD = 0.05
 
 # ── Signal processing imports ────────────────────────────────────────────────
 try:
     from advance_signal_processing import (
-        remove_lnb_effect, denoise_signal, process_fft,
+        denoise_signal, process_fft,
         extract_hi_line, _get_workspace, set_lnb_enabled,
     )
     _HAS_SIGNAL_PROC = True
 except Exception:
     _HAS_SIGNAL_PROC = False
-    remove_lnb_effect = denoise_signal = process_fft = None
+    denoise_signal = process_fft = None
     extract_hi_line   = _get_workspace = set_lnb_enabled = None
 
 try:
@@ -210,13 +199,11 @@ except Exception:
     RadiometryCalibrator = None
 
 try:
-    from coordinates import get_pointing_metadata, freq_to_velocity_lsr, apply_lsr_correction
+    from coordinates import get_pointing_metadata
     _HAS_COORDS = True
 except Exception:
     _HAS_COORDS = False
     get_pointing_metadata = None
-    freq_to_velocity_lsr  = None
-    apply_lsr_correction  = None
 
 try:
     from candidate_db import CandidateDB
@@ -324,9 +311,9 @@ def connect_to_server():
 
     sdr = HackRF()
     try:
-        sdr.sample_rate = sample_rate
+        sdr.sample_rate = fs
         sdr.center_freq = int((freq_start + freq_stop) / 2)
-        sdr.bandwidth   = int(sample_rate)
+        sdr.bandwidth   = int(fs)
         sdr.lna_gain    = gain
         sdr.vga_gain    = gain
         sdr.amp_enable  = False
@@ -567,7 +554,6 @@ def process_continuous_stream(sdr, model, output_dir: str):
     empty_reads       = 0
     MAX_EMPTY         = 3
     last_stat_log     = datetime.datetime.now()
-    _chunk_counter    = 0
 
     # Terminal key-press (best-effort; no-op in non-TTY environments)
     IS_TTY = sys.stdin.isatty() if hasattr(sys.stdin, 'isatty') else False
@@ -623,7 +609,6 @@ def process_continuous_stream(sdr, model, output_dir: str):
 
             # ── Push to ring (zero-copy accumulator) ─────────────────────
             ring.push(raw.astype(np.complex64))
-            _chunk_counter += 1
 
             # ── Process all complete chunks in the ring ──────────────────
             while True:
@@ -857,7 +842,10 @@ def process_continuous_stream(sdr, model, output_dir: str):
                 }
 
                 with data_lock:
-                    latest_data.update(web_data)
+                    # Explicit key assignment — prevents stale key accumulation
+                    # that dict.update() causes after long runs or code changes.
+                    for _k, _v in web_data.items():
+                        latest_data[_k] = _v
 
                 # ── Periodic log + memory housekeeping ────────────────────
                 if (now - last_stat_log).total_seconds() > 5:
@@ -891,6 +879,16 @@ def process_continuous_stream(sdr, model, output_dir: str):
                     except Exception as e:
                         logger.error(f'Detection queue put failed: {e}')
                     det_buf.clear()
+                    # Reset raw ring so next detection snapshot is clean
+                    raw_ring.full  = False
+                    raw_ring.idx   = 0
+                    raw_ring.buf[:] = 0
+                    # Reset baseline and averager so the detection signal doesn't
+                    # contaminate the next 10 minutes of spectral processing
+                    if rolling_baseline is not None:
+                        rolling_baseline.reset()
+                    if spectral_averager is not None:
+                        spectral_averager.reset()
 
     except KeyboardInterrupt:
         logger.info('Interrupted by user')
@@ -913,26 +911,6 @@ def process_continuous_stream(sdr, model, output_dir: str):
             pass
         logger.info('Processing stopped')
 
-
-# ── FITS save helpers ─────────────────────────────────────────────────────────
-def save_fits(processed_samples, output_dir, timestamp):
-    fits_dir = os.path.join(output_dir, 'fits')
-    os.makedirs(fits_dir, exist_ok=True)
-    fname = os.path.join(fits_dir, f'signal_{timestamp.strftime("%Y%m%d_%H%M%S")}.fits')
-    try:
-        data_c = np.asarray(processed_samples, dtype=np.complex64)
-        real_p = np.real(data_c).astype(np.float32)
-        imag_p = np.imag(data_c).astype(np.float32)
-        hdu = fits.PrimaryHDU(np.vstack([real_p, imag_p]))
-        hdu.header['DATE']    = timestamp.strftime('%Y-%m-%dT%H:%M:%S')
-        hdu.header['TELESCOP'] = 'HackRF One'
-        hdu.header['LOFREQ']  = float(LO / 1e6)
-        hdu.header['IFCENT']  = float(center_freq / 1e6)
-        hdu.header['COMPLEX'] = 'REAL_IMAG'
-        fits.HDUList([hdu]).writeto(fname, overwrite=True)
-        logger.info(f'FITS saved: {fname}')
-    except Exception as e:
-        logger.error(f'FITS write failed: {e}')
 
 
 # ── main() ────────────────────────────────────────────────────────────────────
@@ -985,14 +963,14 @@ def main():
 
     os.makedirs(args.output_dir, exist_ok=True)
 
-    global USE_LNB, LO
+    global LO
     lnb_band = LNB_LOW if args.band == 'low' else LNB_HIGH
     if args.lnboff:
-        USE_LNB = False; LO = 0.0
+        LO = 0.0
         if set_lnb_enabled: set_lnb_enabled(False)
         logger.info('LNB disabled')
     else:
-        USE_LNB = True; LO = lnb_band
+        LO = lnb_band
         if set_lnb_enabled: set_lnb_enabled(True)
 
     model_path = os.path.join('models', 'full_state', 'full_model.keras')
